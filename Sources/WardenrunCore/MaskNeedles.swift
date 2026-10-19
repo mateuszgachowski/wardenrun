@@ -81,7 +81,9 @@ public enum MaskNeedles {
         }
         for lowercaseHex in [false, true] {
             for spaceAsPlus in [false, true] {
-                add(percent(value, lowercaseHex: lowercaseHex, spaceAsPlus: spaceAsPlus))
+                for kept in percentKeptSets {
+                    add(percent(value, lowercaseHex: lowercaseHex, spaceAsPlus: spaceAsPlus, kept: kept))
+                }
             }
         }
         add(Array(Hex.encode(value).utf8))
@@ -90,12 +92,16 @@ public enum MaskNeedles {
             for escapeSlash in [false, true] {
                 for asciiOnly in [false, true] {
                     for htmlSafe in [false, true] {
-                        add(jsonBody(text, escapeSlash: escapeSlash, asciiOnly: asciiOnly, htmlSafe: htmlSafe))
+                        for uppercaseHex in [false, true] {
+                            add(jsonBody(text, escapeSlash: escapeSlash, asciiOnly: asciiOnly,
+                                         htmlSafe: htmlSafe, uppercaseHex: uppercaseHex))
+                        }
                     }
                 }
             }
         }
-        add(singleQuoteBody(value))
+        add(singleQuoteBody(value, replacing: [0x27, 0x5C, 0x27, 0x27]))        // bash: '\''
+        add(singleQuoteBody(value, replacing: [0x27, 0x22, 0x27, 0x22, 0x27]))  // Python shlex.quote: '"'"'
     }
 
     private static let standardAlphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
@@ -131,7 +137,11 @@ public enum MaskNeedles {
         return start < end ? Array(encoded[start..<end]) : []
     }
 
-    private static func percent(_ bytes: [UInt8], lowercaseHex: Bool, spaceAsPlus: Bool) -> [UInt8] {
+    /// Encoders disagree about what they leave alone besides the unreserved set: nothing (RFC 3986),
+    /// "/" (Python `urllib.parse.quote`), and `!'()*` (JavaScript `encodeURIComponent`).
+    private static let percentKeptSets: [Set<UInt8>] = [[], [UInt8(ascii: "/")], Set("!'()*".utf8)]
+
+    private static func percent(_ bytes: [UInt8], lowercaseHex: Bool, spaceAsPlus: Bool, kept: Set<UInt8>) -> [UInt8] {
         let digits = Array((lowercaseHex ? "0123456789abcdef" : "0123456789ABCDEF").utf8)
         var out = [UInt8]()
         for byte in bytes {
@@ -142,6 +152,8 @@ public enum MaskNeedles {
                 out.append(byte)
             case UInt8(ascii: " ") where spaceAsPlus:
                 out.append(UInt8(ascii: "+"))
+            case _ where kept.contains(byte):
+                out.append(byte)
             default:
                 out.append(UInt8(ascii: "%"))
                 out.append(digits[Int(byte >> 4)])
@@ -151,9 +163,10 @@ public enum MaskNeedles {
         return out
     }
 
-    private static func jsonBody(_ text: String, escapeSlash: Bool, asciiOnly: Bool, htmlSafe: Bool) -> [UInt8] {
+    private static func jsonBody(_ text: String, escapeSlash: Bool, asciiOnly: Bool, htmlSafe: Bool,
+                                 uppercaseHex: Bool) -> [UInt8] {
         func unicodeEscape(_ unit: UInt16) -> String {
-            let hex = String(unit, radix: 16)
+            let hex = String(unit, radix: 16, uppercase: uppercaseHex)
             return "\\u" + String(repeating: "0", count: 4 - hex.count) + hex
         }
         var out = ""
@@ -182,10 +195,10 @@ public enum MaskNeedles {
         return Array(out.utf8)
     }
 
-    private static func singleQuoteBody(_ bytes: [UInt8]) -> [UInt8] {
+    private static func singleQuoteBody(_ bytes: [UInt8], replacing quote: [UInt8]) -> [UInt8] {
         var out = [UInt8]()
         for byte in bytes {
-            if byte == 0x27 { out += [0x27, 0x5C, 0x27, 0x27] } else { out.append(byte) }
+            if byte == 0x27 { out += quote } else { out.append(byte) }
         }
         return out
     }

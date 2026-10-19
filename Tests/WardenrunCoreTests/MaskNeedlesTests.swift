@@ -71,6 +71,25 @@ struct MaskNeedlesTests {
         has(MaskNeedles.variants(of: Self.v), #"Tr0ub4dor&3 x'\''"/\"#)
     }
 
+    // MARK: encoders that differ in what they leave alone
+
+    @Test func containsPercentFormsThatKeepSlashAndTheJavaScriptSafeSet() {
+        let variants = MaskNeedles.variants(of: Array("a b!'()*c/d".utf8))
+        has(variants, "a%20b%21%27%28%29%2Ac%2Fd")      // keeps nothing
+        has(variants, "a%20b%21%27%28%29%2Ac/d")        // Python urllib.parse.quote keeps "/"
+        has(variants, "a%20b!'()*c%2Fd")                // JavaScript encodeURIComponent keeps !'()*
+    }
+
+    @Test func containsThePythonShellQuotingOfASingleQuote() {
+        has(MaskNeedles.variants(of: Array("it's-a-secret".utf8)), "it'\"'\"'s-a-secret")   // shlex.quote
+        has(MaskNeedles.variants(of: Array("it's-a-secret".utf8)), "it'" + bs + "''s-a-secret")  // bash xtrace
+    }
+
+    @Test func containsUpperCaseHexInJSONUnicodeEscapes() {
+        let variants = MaskNeedles.variants(of: Array("zażółć-gęślą".utf8))
+        has(variants, "za" + esc("017C") + esc("00F3") + esc("0142") + esc("0107") + "-g" + esc("0119") + esc("015B") + "l" + esc("0105"))
+    }
+
     // MARK: base64 inside a bigger stream
 
     @Test(arguments: Array(0...8), [0, 5])
