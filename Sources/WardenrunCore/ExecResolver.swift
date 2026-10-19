@@ -20,8 +20,11 @@ public enum ExecError: Error, Equatable {
 /// Turns the command a caller typed into the one file that will run, the way a shell would,
 /// so that the file shown for approval, the file hashed and the file spawned are the same.
 ///
-/// The file is looked up and hashed once, when `resolve` runs. A swap between that call and
-/// `posix_spawn` is not caught here; the caller closes it by spawning the returned `path`.
+/// The file is looked up and hashed when `resolve` runs. That is a check at one moment, not a
+/// lock: a process of the same user that can write the file (a script in the project, a tool in
+/// `~/.local/bin`) can swap it afterwards. `stillMatches` narrows the window when called right
+/// before `posix_spawn`; it cannot close it, so the approval text should tell the human when the
+/// file is writable by them. See the threat model, "a command you approved".
 public enum ExecResolver {
     /// Rules: a command with a `/` is used as given (relative to `cwd`); otherwise each
     /// `searchPath` entry is tried in order, an empty or relative entry meaning `cwd`;
@@ -44,6 +47,15 @@ public enum ExecResolver {
         guard let finalKind = kind(of: resolved) else { throw ExecError.notFound(command) }
         try require(finalKind, at: resolved)
         return ResolvedExecutable(path: resolved, argv: argv, sha256: try hashFile(at: resolved))
+    }
+
+    /// True when `executable.path` still resolves to itself, is still a regular executable file,
+    /// and still has the hash recorded by `resolve`. Call it immediately before spawning.
+    public static func stillMatches(_ executable: ResolvedExecutable) -> Bool {
+        guard realPath(executable.path) == executable.path,
+              kind(of: executable.path) == .regularExecutable,
+              let hash = try? hashFile(at: executable.path) else { return false }
+        return hash == executable.sha256
     }
 
     // MARK: internals

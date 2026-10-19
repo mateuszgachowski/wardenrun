@@ -90,4 +90,20 @@ struct EnvPolicyTests {
         #expect(EnvPolicy.loaderVariables(in: ["DYLD_X": "1", "PATH": "/x", "DYLD_A": "2"]) == ["DYLD_A", "DYLD_X"])
         #expect(EnvPolicy.loaderVariables(in: ["PATH": "/x"]).isEmpty)
     }
+
+    @Test func riskyVariablesNameTheInterpreterAndShellStartupHooks() {
+        let env = ["NODE_OPTIONS": "--require /tmp/x.js", "BASH_ENV": "/tmp/x", "PYTHONPATH": "/tmp", "PERL5OPT": "-Mx",
+                   "RUBYOPT": "-rx", "GIT_SSH_COMMAND": "ssh -o x", "JAVA_TOOL_OPTIONS": "-javaagent:x.jar",
+                   "LD_PRELOAD": "/x.so", "DYLD_INSERT_LIBRARIES": "/x.dylib", "BASH_FUNC_ls%%": "() { x; }",
+                   "PATH": "/usr/bin", "HOME": "/h", "API_KEY": "k", "OLD_PASSWORD": "p"]
+        #expect(EnvPolicy.riskyVariables(in: env) == [
+            "BASH_ENV", "BASH_FUNC_ls%%", "DYLD_INSERT_LIBRARIES", "GIT_SSH_COMMAND", "JAVA_TOOL_OPTIONS",
+            "LD_PRELOAD", "NODE_OPTIONS", "PERL5OPT", "PYTHONPATH", "RUBYOPT",
+        ])
+    }
+
+    @Test func riskyVariablesIsEmptyForAnOrdinaryEnvironment() {
+        #expect(EnvPolicy.riskyVariables(in: ["PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TERM": "xterm"]).isEmpty)
+    }
 }
+

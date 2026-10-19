@@ -53,6 +53,26 @@ public enum EnvPolicy {
         environment.keys.filter { $0.hasPrefix("DYLD_") }.sorted()
     }
 
+    private static let riskyNames: Set<String> = [
+        "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "PROMPT_COMMAND", "IFS",
+        "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+        "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+        "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXEC_PATH",
+    ]
+    private static let riskyPrefixes = ["LD_", "DYLD_", "BASH_FUNC_"]
+
+    /// Names in `environment` that make an ordinary program load or run somebody's code at
+    /// startup (`NODE_OPTIONS=--require`, `BASH_ENV`, `LD_PRELOAD`, ...). The approval sheet shows
+    /// the command but not the environment, so these should appear on it as `[env: NAME]`. The
+    /// list is the common offenders, not a complete one; it is there to inform the human, not to
+    /// block (people use `NODE_OPTIONS` for legitimate reasons).
+    public static func riskyVariables(in environment: [String: String]) -> [String] {
+        environment.keys.filter { name in
+            riskyNames.contains(name) || riskyPrefixes.contains { name.hasPrefix($0) }
+        }.sorted()
+    }
+
     private static func isDigit(_ byte: UInt8) -> Bool {
         byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9")
     }

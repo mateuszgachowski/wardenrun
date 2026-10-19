@@ -83,6 +83,32 @@ struct ExecResolverTests {
         }
     }
 
+    @Test func stillMatchesIsTrueRightAfterResolvingAndFalseOnceTheFileChanges() throws {
+        try withTempDirectory { (dir: String) throws in
+            writeFile(dir + "/tool", "#!/bin/sh\necho one\n")
+            let found = try resolve(["./tool"], path: "", cwd: dir)
+            #expect(ExecResolver.stillMatches(found))
+            writeFile(dir + "/tool", "#!/bin/sh\necho two\n")
+            #expect(!ExecResolver.stillMatches(found))
+        }
+    }
+
+    @Test func stillMatchesIsFalseWhenTheFileIsGoneReplacedByALinkOrNoLongerExecutable() throws {
+        try withTempDirectory { (dir: String) throws in
+            writeFile(dir + "/tool", "same bytes")
+            writeFile(dir + "/other", "same bytes")
+            let found = try resolve(["./tool"], path: "", cwd: dir)
+            // swapped for a symlink to a file with identical content: the path no longer resolves to itself
+            try FileManager.default.removeItem(atPath: dir + "/tool")
+            try FileManager.default.createSymbolicLink(atPath: dir + "/tool", withDestinationPath: dir + "/other")
+            #expect(!ExecResolver.stillMatches(found))
+            try FileManager.default.removeItem(atPath: dir + "/tool")
+            #expect(!ExecResolver.stillMatches(found))   // gone
+            writeFile(dir + "/tool", "same bytes", mode: 0o644)
+            #expect(!ExecResolver.stillMatches(found))   // same bytes, no execute bit
+        }
+    }
+
     @Test func rejectsAnEmptyCommand() throws {
         try withTempDirectory { (dir: String) throws in
             #expect(throws: ExecError.emptyCommand) { try resolve([], path: "/bin", cwd: dir) }
