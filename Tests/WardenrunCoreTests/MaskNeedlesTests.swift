@@ -7,6 +7,11 @@ struct MaskNeedlesTests {
 
     private func text(_ bytes: [UInt8]) -> String { String(decoding: bytes, as: UTF8.self) }
 
+    /// A literal backslash, and a JSON unicode escape built from it. Spelled out in pieces so that
+    /// no tool or editor can quietly turn the written-out escape back into the character.
+    private let bs = "\\"
+    private func esc(_ hex: String) -> String { bs + "u" + hex }
+
     private func has(_ variants: [[UInt8]], _ expected: String, sourceLocation: SourceLocation = #_sourceLocation) {
         #expect(variants.contains(Array(expected.utf8)), "missing variant: \(expected)", sourceLocation: sourceLocation)
     }
@@ -48,13 +53,18 @@ struct MaskNeedlesTests {
         let variants = MaskNeedles.variants(of: Self.v)
         has(variants, #"Tr0ub4dor&3 x'\"/\\"#)            // minimal escaping
         has(variants, #"Tr0ub4dor&3 x'\"\/\\"#)           // slash escaped
-        has(variants, #"Tr0ub4dor&3 x'\"/\\"#)       // HTML-safe encoders escape &, <, >
+        has(variants, "Tr0ub4dor" + esc("0026") + "3 x'" + bs + "\"/" + bs + bs)   // HTML-safe encoders escape &, <, >
+    }
+
+    @Test func containsHTMLSafeJSONForAngleBrackets() {
+        let variants = MaskNeedles.variants(of: Array("a<b>&cd".utf8))
+        has(variants, "a" + esc("003c") + "b" + esc("003e") + esc("0026") + "cd")
     }
 
     @Test func containsASCIIOnlyJSONForNonASCIIValues() {
         let variants = MaskNeedles.variants(of: Array("zażółć-gęślą".utf8))
         has(variants, "zażółć-gęślą")
-        has(variants, #"zażółć-gęślą"#)
+        has(variants, "za" + esc("017c") + esc("00f3") + esc("0142") + esc("0107") + "-g" + esc("0119") + esc("015b") + "l" + esc("0105"))
     }
 
     @Test func containsSingleQuoteShellBody() {
