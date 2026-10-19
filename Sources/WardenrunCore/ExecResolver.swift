@@ -19,6 +19,9 @@ public enum ExecError: Error, Equatable {
 
 /// Turns the command a caller typed into the one file that will run, the way a shell would,
 /// so that the file shown for approval, the file hashed and the file spawned are the same.
+///
+/// The file is looked up and hashed once, when `resolve` runs. A swap between that call and
+/// `posix_spawn` is not caught here; the caller closes it by spawning the returned `path`.
 public enum ExecResolver {
     /// Rules: a command with a `/` is used as given (relative to `cwd`); otherwise each
     /// `searchPath` entry is tried in order, an empty or relative entry meaning `cwd`;
