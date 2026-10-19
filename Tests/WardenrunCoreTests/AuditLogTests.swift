@@ -165,6 +165,24 @@ struct AuditLogTests {
         }
     }
 
+    @Test func aLastLineLongerThanOneReadBlockStillChainsCorrectly() throws {
+        try withTempDirectory { (dir: String) throws in
+            let audit = log(dir)
+            var appended = 0
+            // The line before each short one is 3.9 kB to 4.5 kB, straddling the 4096-byte read block.
+            for padding in stride(from: 3900, through: 4500, by: 13) {
+                try audit.append(AuditEvent(event: .denied, item: String(repeating: "x", count: padding)))
+                try audit.append(AuditEvent(event: .approved, item: "short"))
+                appended += 2
+            }
+            try audit.append(AuditEvent(event: .denied, commandLine: [String(repeating: "y", count: 10_000)]))
+            try audit.append(AuditEvent(event: .approved, item: "after a 10 kB line"))
+            appended += 2
+            let result = try AuditLog.verify(path: path(dir))
+            #expect(result == .ok(lines: appended))
+        }
+    }
+
     @Test func verifyHandlesEmptyAndMissingFiles() throws {
         try withTempDirectory { dir in
             #expect(throws: (any Error).self) { try AuditLog.verify(path: dir + "/nope.jsonl") }

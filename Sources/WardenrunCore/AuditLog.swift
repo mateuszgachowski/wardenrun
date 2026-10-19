@@ -4,8 +4,9 @@ public enum AuditEventKind: String, Codable, Sendable {
     case approved, denied, timeout, error, new, setup
 }
 
-/// What gets recorded about one decision. Never a secret value.
-public struct AuditEvent: Codable, Equatable, Sendable {
+/// What gets recorded about one decision. Never a secret value. Deliberately not `Codable`:
+/// the only way to turn an event into bytes is `AuditLog.append`, which redacts every string.
+public struct AuditEvent: Equatable, Sendable {
     public var event: AuditEventKind
     public var item: String?
     public var commandLine: [String]?
@@ -32,16 +33,6 @@ public struct AuditEvent: Codable, Equatable, Sendable {
         self.exitStatus = exitStatus
         self.durationMs = durationMs
     }
-
-    enum CodingKeys: String, CodingKey {
-        case event, item, cwd, tier
-        case commandLine = "command_line"
-        case executable
-        case executableSHA256 = "executable_sha256"
-        case parentChain = "parent_chain"
-        case exitStatus = "exit_status"
-        case durationMs = "duration_ms"
-    }
 }
 
 public enum AuditVerification: Equatable, Sendable {
@@ -57,8 +48,13 @@ public enum AuditLogError: Error, Equatable {
 }
 
 /// Append-only log of decisions. One JSON object per line; each line carries the SHA-256 of
-/// the previous line, so editing or removing a line in the middle is detectable. Deleting
-/// the whole file, or editing the very last line, is not (the same user can do both).
+/// the previous line.
+///
+/// What that buys, honestly: it catches accidental damage and a naive edit or deletion in the
+/// middle of the file. It does **not** stop a same-user process that knows the format: the
+/// hash has no key, so it can rewrite a line and recompute every later `prev`, drop the last
+/// lines, or delete the file, and `verify` still says `.ok`. Binding the chain to a key and a
+/// counter kept in the protected keychain item is a later hardening step.
 public struct AuditLog: Sendable {
     private static let firstPrev = String(repeating: "0", count: 64)
 
@@ -67,9 +63,10 @@ public struct AuditLog: Sendable {
     private let clock: @Sendable () -> Date
 
     /// `redactor` runs on every string before it is written, so a secret that sneaked into a
-    /// command line is masked even if the caller forgot.
+    /// command line is masked even if the caller forgot. It is required on purpose: a call
+    /// site that has no masker yet must say so with `{ $0 }`.
     public init(path: String,
-                redactor: @escaping @Sendable (String) -> String = { $0 },
+                redactor: @escaping @Sendable (String) -> String,
                 clock: @escaping @Sendable () -> Date = { Date() }) {
         self.path = path
         self.redactor = redactor
