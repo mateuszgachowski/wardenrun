@@ -29,3 +29,20 @@ func permissionBits(of path: String) -> Int? {
     guard stat(path, &info) == 0 else { return nil }
     return Int(info.st_mode & 0o777)
 }
+
+/// `realpath(3)` as a String; the temp directory on macOS sits behind the /var -> /private/var link.
+func realPath(_ path: String) -> String {
+    guard let resolved = realpath(path, nil) else { return path }
+    defer { free(resolved) }
+    return String(cString: resolved)
+}
+
+/// Writes a small file with the given permission bits and returns its path.
+@discardableResult
+func writeFile(_ path: String, _ contents: String = "#!/bin/sh\necho hi\n", mode: Int = 0o755) -> String {
+    try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
+                                             withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: path, contents: Data(contents.utf8))
+    chmod(path, mode_t(mode))
+    return path
+}
