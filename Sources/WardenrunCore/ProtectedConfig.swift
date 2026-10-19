@@ -49,8 +49,13 @@ public enum BwPin: Codable, Equatable, Sendable {
 
 public enum ConfigError: Error, Equatable {
     case unsupportedVersion(Int)
+    /// The server is not plain HTTPS, or the URL carries credentials.
     case insecureServerURL
+    /// The server URL cannot be used at all: unparseable, bad host or port, query or fragment.
+    case invalidServerURL
     case missingField(String)
+    /// The named field is present but not acceptable (shape, encoding or an absolute-path rule).
+    case invalidValue(String)
     case emptyCollections
     case invalidHash(String)
     case malformed
@@ -75,25 +80,37 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
     public init(serverURL: URL, accountEmail: String, organizationID: String, collectionIDs: [String],
                 masterPassword: SecretBuffer, bwPin: BwPin,
                 nodeExtraCACerts: String? = nil, httpsProxy: String? = nil) throws {
-        guard serverURL.scheme?.lowercased() == "https", let host = serverURL.host, !host.isEmpty,
-              serverURL.user == nil, serverURL.password == nil else { throw ConfigError.insecureServerURL }
+        let checkedURL = try Self.validatedServerURL(serverURL.absoluteString)
         guard !accountEmail.isEmpty else { throw ConfigError.missingField("account_email") }
         guard !organizationID.isEmpty else { throw ConfigError.missingField("organization_id") }
+        guard Self.isSafeID(organizationID) else { throw ConfigError.invalidValue("organization_id") }
         guard !collectionIDs.isEmpty else { throw ConfigError.emptyCollections }
+        guard collectionIDs.allSatisfy(Self.isSafeID) else { throw ConfigError.invalidValue("collection_ids") }
         guard masterPassword.count > 0 else { throw ConfigError.missingField("master_password") }
+        // A password that is not valid UTF-8 would be silently rewritten by the JSON round trip.
+        guard masterPassword.withUnsafeBytes({ String(bytes: Array($0), encoding: .utf8) != nil }) else {
+            throw ConfigError.invalidValue("master_password")
+        }
+        let checkedPin: BwPin
         switch bwPin {
         case .signedRelease(let teamID):
-            guard !teamID.isEmpty else { throw ConfigError.missingField("team_id") }
-        case .nodeScript(_, let nodeSHA256, _, let scriptSHA256):
+            // Later code builds a code requirement from this string, so its shape is fixed here.
+            guard Self.isTeamID(teamID) else { throw ConfigError.invalidValue("team_id") }
+            checkedPin = bwPin
+        case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
+            guard Self.isAbsolutePath(nodePath) else { throw ConfigError.invalidValue("node_path") }
             guard Self.isSHA256Hex(nodeSHA256) else { throw ConfigError.invalidHash("node_sha256") }
+            guard Self.isAbsolutePath(scriptPath) else { throw ConfigError.invalidValue("script_path") }
             guard Self.isSHA256Hex(scriptSHA256) else { throw ConfigError.invalidHash("script_sha256") }
+            checkedPin = .nodeScript(nodePath: nodePath, nodeSHA256: nodeSHA256.lowercased(),
+                                     scriptPath: scriptPath, scriptSHA256: scriptSHA256.lowercased())
         }
-        self.serverURL = serverURL
+        self.serverURL = checkedURL
         self.accountEmail = accountEmail
         self.organizationID = organizationID
         self.collectionIDs = collectionIDs
         self.masterPassword = masterPassword
-        self.bwPin = bwPin
+        self.bwPin = checkedPin
         self.nodeExtraCACerts = nodeExtraCACerts
         self.httpsProxy = httpsProxy
     }
@@ -120,7 +137,7 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
         guard let collections = wire.collectionIDs else { throw ConfigError.missingField("collection_ids") }
         guard let password = wire.masterPassword else { throw ConfigError.missingField("master_password") }
         guard let pin = wire.bwPin else { throw ConfigError.missingField("bw_pin") }
-        guard let url = URL(string: serverText) else { throw ConfigError.insecureServerURL }
+        let url = try validatedServerURL(serverText)
         return try ProtectedConfig(serverURL: url, accountEmail: email, organizationID: organization,
                                    collectionIDs: collections, masterPassword: SecretBuffer(copying: Array(password.utf8)),
                                    bwPin: pin, nodeExtraCACerts: wire.nodeExtraCACerts, httpsProxy: wire.httpsProxy)
@@ -133,6 +150,81 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
     public var debugDescription: String { description }
 
     public var customMirror: Mirror { Mirror(self, children: []) }
+
+    // MARK: validation helpers
+
+    /// Plain HTTPS only, checked on the raw text so macOS and Linux agree (Foundation's own URL
+    /// parsing differs between them): ASCII without spaces or control characters (an
+    /// internationalised name must be given as punycode), a real host, a port in 1...65535, no
+    /// credentials, no query, no fragment. The scheme is stored lower case.
+    static func validatedServerURL(_ text: String) throws -> URL {
+        guard !text.isEmpty, text.utf8.allSatisfy({ $0 > 0x20 && $0 < 0x7F }),
+              let separator = text.range(of: "://") else { throw ConfigError.invalidServerURL }
+        let scheme = text[..<separator.lowerBound].lowercased()
+        guard !scheme.isEmpty else { throw ConfigError.invalidServerURL }
+        guard scheme == "https" else { throw ConfigError.insecureServerURL }
+        let rest = String(text[separator.upperBound...])
+        guard !rest.contains("?"), !rest.contains("#") else { throw ConfigError.invalidServerURL }
+        let authority = String(rest.prefix { $0 != "/" })
+        guard !authority.contains("@") else { throw ConfigError.insecureServerURL }
+
+        let host: String
+        var portText: Substring?
+        if authority.hasPrefix("[") {
+            guard let close = authority.firstIndex(of: "]") else { throw ConfigError.invalidServerURL }
+            host = String(authority[authority.index(after: authority.startIndex)..<close])
+            let after = authority[authority.index(after: close)...]
+            if !after.isEmpty {
+                guard after.hasPrefix(":") else { throw ConfigError.invalidServerURL }
+                portText = after.dropFirst()
+            }
+        } else {
+            let parts = authority.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count <= 2 else { throw ConfigError.invalidServerURL }
+            host = String(parts[0])
+            if parts.count == 2 { portText = parts[1] }
+        }
+        guard isValidHost(host) else { throw ConfigError.invalidServerURL }
+        if let portText {
+            guard !portText.isEmpty, portText.utf8.count <= 5, portText.utf8.allSatisfy(isDigit),
+                  let port = Int(portText), (1...65535).contains(port) else { throw ConfigError.invalidServerURL }
+        }
+        guard let url = URL(string: "https://" + rest) else { throw ConfigError.invalidServerURL }
+        return url
+    }
+
+    private static func isValidHost(_ host: String) -> Bool {
+        if host.contains(":") {   // an IPv6 literal, brackets already removed
+            return host.utf8.count >= 2 && host.utf8.allSatisfy { isHexDigit($0) || $0 == UInt8(ascii: ":") || $0 == UInt8(ascii: ".") }
+        }
+        guard !host.isEmpty, host.utf8.count <= 253 else { return false }
+        return host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in
+            !label.isEmpty && label.utf8.count <= 63 && !label.hasPrefix("-") && !label.hasSuffix("-")
+                && label.utf8.allSatisfy { isAlphanumeric($0) || $0 == UInt8(ascii: "-") }
+        }
+    }
+
+    private static func isSafeID(_ text: String) -> Bool {
+        (1...64).contains(text.utf8.count) && text.utf8.allSatisfy { isAlphanumeric($0) || $0 == UInt8(ascii: "-") }
+    }
+
+    private static func isTeamID(_ text: String) -> Bool {
+        text.utf8.count == 10 && text.utf8.allSatisfy { ($0 >= UInt8(ascii: "A") && $0 <= UInt8(ascii: "Z")) || isDigit($0) }
+    }
+
+    private static func isAbsolutePath(_ text: String) -> Bool {
+        text.hasPrefix("/") && text.utf8.allSatisfy { $0 >= 0x20 && $0 != 0x7F }
+    }
+
+    private static func isDigit(_ byte: UInt8) -> Bool { byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9") }
+
+    private static func isAlphanumeric(_ byte: UInt8) -> Bool {
+        isDigit(byte) || (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "Z")) || (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "z"))
+    }
+
+    private static func isHexDigit(_ byte: UInt8) -> Bool {
+        isDigit(byte) || (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "F")) || (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "f"))
+    }
 
     private static func isSHA256Hex(_ text: String) -> Bool {
         text.utf8.count == 64 && Hex.decode(text) != nil
