@@ -12,3 +12,20 @@ struct SeededRandom: RandomNumberGenerator {
         return z ^ (z >> 31)
     }
 }
+
+import Foundation
+
+/// Runs `body` with a fresh empty directory that is removed afterwards.
+func withTempDirectory<T>(_ body: (String) throws -> T) rethrows -> T {
+    let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("wardenrun-test-" + UUID().uuidString)
+    try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    return try body(path)
+}
+
+/// Permission bits (`0o600` style) of a path, or nil when it does not exist.
+func permissionBits(of path: String) -> Int? {
+    var info = stat()
+    guard stat(path, &info) == 0 else { return nil }
+    return Int(info.st_mode & 0o777)
+}
