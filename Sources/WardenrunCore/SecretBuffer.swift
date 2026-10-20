@@ -62,6 +62,13 @@ public final class SecretBuffer: @unchecked Sendable, CustomStringConvertible, C
         return try body(UnsafeRawBufferPointer(start: storage, count: length))
     }
 
+    /// In-place writes, for code of this package that fills the buffer a piece at a time (the
+    /// hidden terminal prompt) instead of building the secret in an array first.
+    package func withUnsafeMutableBytes<R>(_ body: (UnsafeMutableRawBufferPointer) throws -> R) rethrows -> R {
+        guardLock.lock(); defer { guardLock.unlock() }
+        return try body(UnsafeMutableRawBufferPointer(start: storage, count: length))
+    }
+
     /// Zeroes the whole allocation and empties the buffer. Safe to call more than once.
     public func wipe() {
         guardLock.lock(); defer { guardLock.unlock() }

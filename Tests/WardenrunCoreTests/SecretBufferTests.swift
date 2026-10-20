@@ -81,4 +81,15 @@ struct SecretBufferTests {
             _ = try SecretBuffer(count: 8) { _ in throw FillFailed() }
         }
     }
+
+    @Test func mutableAccessWritesInPlaceAndWipeStillZeroesIt() {
+        let buffer = SecretBuffer(count: 4) { _ in }
+        buffer.withUnsafeMutableBytes { bytes in
+            bytes[0] = 7
+            bytes[3] = 9
+        }
+        #expect(buffer.withUnsafeBytes { Array($0) } == [7, 0, 0, 9])
+        buffer.wipe()
+        #expect(buffer.storageForTesting.allSatisfy { $0 == 0 })
+    }
 }
