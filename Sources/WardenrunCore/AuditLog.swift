@@ -19,11 +19,13 @@ public struct AuditEvent: Equatable, Sendable {
     public var tier: String?
     public var exitStatus: Int32?
     public var durationMs: Int?
+    /// Where the secret went (`$VAR`, `file $VAR`, `stdin`): names the flags chose, never values.
+    public var injected: [String]?
 
     public init(event: AuditEventKind, item: String? = nil, commandLine: [String]? = nil,
                 executable: String? = nil, executableSHA256: String? = nil, cwd: String? = nil,
                 parentChain: [String]? = nil, tier: String? = nil, exitStatus: Int32? = nil,
-                durationMs: Int? = nil) {
+                durationMs: Int? = nil, injected: [String]? = nil) {
         self.event = event
         self.item = item
         self.commandLine = commandLine
@@ -34,6 +36,7 @@ public struct AuditEvent: Equatable, Sendable {
         self.tier = tier
         self.exitStatus = exitStatus
         self.durationMs = durationMs
+        self.injected = injected
     }
 }
 
@@ -63,16 +66,19 @@ public struct AuditLog: Sendable {
     private let path: String
     private let redactor: @Sendable (String) -> String
     private let clock: @Sendable () -> Date
+    private let lockTimeout: TimeInterval
 
     /// `redactor` runs on every string before it is written, so a secret that sneaked into a
     /// command line is masked even if the caller forgot. It is required on purpose: a call
     /// site that has no masker yet must say so with `{ $0 }`.
     public init(path: String,
                 redactor: @escaping @Sendable (String) -> String,
-                clock: @escaping @Sendable () -> Date = { Date() }) {
+                clock: @escaping @Sendable () -> Date = { Date() },
+                lockTimeout: TimeInterval = 2) {
         self.path = path
         self.redactor = redactor
         self.clock = clock
+        self.lockTimeout = lockTimeout
     }
 
     public func append(_ event: AuditEvent) throws {
@@ -83,7 +89,7 @@ public struct AuditLog: Sendable {
         }
         let descriptor = try Self.openForAppend(path: path)
         defer { close(descriptor) }
-        guard flock(descriptor, LOCK_EX) == 0 else { throw AuditLogError.cannotWrite(errno: errno) }
+        try lock(descriptor)
         defer { flock(descriptor, LOCK_UN) }
 
         let last = try Self.lastLine(of: descriptor)
@@ -117,6 +123,19 @@ public struct AuditLog: Sendable {
 
     // MARK: internals
 
+    /// Waits for the exclusive lock, but only for `lockTimeout`: somebody who holds it for ever must
+    /// not be able to stop every `run` right after the touch (the caller warns and carries on).
+    private func lock(_ descriptor: Int32) throws {
+        let deadline = Date().addingTimeInterval(lockTimeout)
+        while true {
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { return }
+            let code = errno
+            guard code == EWOULDBLOCK || code == EINTR else { throw AuditLogError.cannotWrite(errno: code) }
+            if Date() >= deadline { throw AuditLogError.cannotWrite(errno: EWOULDBLOCK) }
+            usleep(10_000)
+        }
+    }
+
     static func openForAppend(path: String) throws -> Int32 {
         let descriptor = open(path, O_RDWR | O_APPEND | O_CREAT, 0o600)
         guard descriptor >= 0 else { throw AuditLogError.cannotOpen(path: path, errno: errno) }
@@ -136,6 +155,7 @@ public struct AuditLog: Sendable {
             case parentChain = "parent_chain"
             case exitStatus = "exit_status"
             case durationMs = "duration_ms"
+            case injected
         }
 
         func encode(to encoder: Encoder) throws {
@@ -152,6 +172,7 @@ public struct AuditLog: Sendable {
             try c.encodeIfPresent(event.tier.map(redact), forKey: .tier)
             try c.encodeIfPresent(event.exitStatus, forKey: .exitStatus)
             try c.encodeIfPresent(event.durationMs, forKey: .durationMs)
+            try c.encodeIfPresent(event.injected.map { $0.map(redact) }, forKey: .injected)
         }
     }
 

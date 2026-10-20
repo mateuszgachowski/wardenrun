@@ -125,4 +125,32 @@ struct AuditHistoryTests {
             #expect(try AuditLog.verify(path: path(dir)) == .ok(lines: 1))
         }
     }
+
+    @Test func aFifoInPlaceOfTheLogIsNotWaitedFor() throws {
+        try withTempDirectory { dir in
+            try FileManager.default.createDirectory(atPath: dir + "/logs", withIntermediateDirectories: true)
+            #expect(mkfifo(path(dir), 0o600) == 0)
+            let done = DispatchSemaphore(value: 0)
+            let box = ResultBox()
+            // Its own thread: the shared pool may be busy with other tests, and a blocked open must not starve it.
+            let logPath = path(dir)
+            Thread.detachNewThread {
+                box.value = AuditLog.lastApprovedHash(path: logPath, item: "alpha", executable: "/usr/bin/curl")
+                done.signal()
+            }
+            let finished = done.wait(timeout: .now() + 3) == .success
+            if !finished {
+                // Release the blocked reader so the test process can end.
+                let writer = open(path(dir), O_WRONLY | O_NONBLOCK)
+                if writer >= 0 { close(writer) }
+                _ = done.wait(timeout: .now() + 2)
+            }
+            #expect(finished, "the lookup blocked on a FIFO")
+            #expect(box.value == nil)
+        }
+    }
+}
+
+private final class ResultBox: @unchecked Sendable {
+    var value: String?
 }

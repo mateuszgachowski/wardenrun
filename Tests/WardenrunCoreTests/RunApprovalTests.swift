@@ -4,10 +4,11 @@ import Testing
 
 private func request(item: String = "api", path: String = "/usr/bin/true", args: [String] = [], argv0: String? = nil,
                      parent: String? = "claude", env: [String: String] = [:], writable: Bool = false,
-                     previousHash: String? = nil, hash: String = "aa") -> ApprovalRequest {
+                     previousHash: String? = nil, hash: String = "aa", injections: [String] = []) -> ApprovalRequest {
     ApprovalRequest(item: item,
                     executable: ResolvedExecutable(path: path, argv: [argv0 ?? (path as NSString).lastPathComponent] + args, sha256: hash),
-                    parent: parent, callerEnvironment: env, executableIsWritable: writable, previousHash: previousHash)
+                    parent: parent, callerEnvironment: env, executableIsWritable: writable, previousHash: previousHash,
+                    injections: injections)
 }
 
 private func text(_ request: ApprovalRequest) throws -> String { try ApprovalTextBuilder.text(for: request) }
@@ -62,7 +63,7 @@ struct RunApprovalTests {
         #expect(try text(request(path: "/opt/tооl/run")).hasPrefix("[non-ASCII] "))          // Cyrillic o
         #expect(try text(request(argv0: "tооl")).hasPrefix("[non-ASCII] "))
         #expect(try text(request(item: "ключ")).hasPrefix("[non-ASCII] "))
-        #expect(!(try text(request(args: ["żółć"]))).contains("[non-ASCII]"), "arguments are shown, not tagged")
+        #expect(try text(request(args: ["żółć"])).hasPrefix("[non-ASCII] "), "an argument counts too: a look-alike letter in a host name")
     }
 
     @Test(arguments: [("sh", ["-c", "echo hi"]), ("bash", ["-lc", "echo hi"]), ("zsh", ["-c", "x"]),
@@ -137,5 +138,48 @@ struct RunApprovalTests {
         let result = try text(request(args: [String(repeating: "\n", count: 120)]))
         #expect(result.utf16.count > 240)
         #expect(throws: ApprovalTextError.self) { _ = try text(request(args: [String(repeating: "\n", count: 200)])) }
+    }
+
+    @Test func theSheetSaysWhereTheSecretGoes() throws {
+        let result = try text(request(injections: ["$GIT_DIR", "file $CERT", "stdin"]))
+        #expect(result == "use secret \"api\" as $GIT_DIR, file $CERT, stdin to run: /usr/bin/true (from claude) [end]")
+    }
+
+    @Test func withoutFlagsTheSheetHasNoAsClause() throws {
+        #expect(try !text(request()).contains(" as "))
+    }
+
+    @Test func theInjectionNamesCountAgainstTheBudget() {
+        let many = (0..<30).map { "$VARIABLE_NUMBER_\($0)" }
+        do {
+            _ = try text(request(injections: many))
+            Issue.record("expected a refusal")
+        } catch let error as ApprovalTextError {
+            guard case .tooLong = error else { Issue.record("wrong error"); return }
+        } catch {
+            Issue.record("wrong error type")
+        }
+    }
+
+    @Test func nonASCIIInAnArgumentIsTagged() throws {
+        let result = try text(request(path: "/usr/bin/curl", args: ["https://\u{430}pi.example.com"]))
+        #expect(result.hasPrefix("[network] [non-ASCII] ") || result.contains("[non-ASCII]"))
+    }
+
+    @Test func plainASCIIArgumentsAreNotTaggedAsNonASCII() throws {
+        #expect(try !text(request(args: ["--flag", "value"])).contains("[non-ASCII]"))
+    }
+
+    @Test(arguments: ["\u{A0}", "\u{2800}", "\u{3164}", "\u{3000}", "\u{115F}", "\u{FFA0}", "\u{2003}"])
+    func blankLookingCharactersAreVisibleEscapes(scalar: String) throws {
+        let result = try text(request(args: ["a" + scalar + "b"]))
+        let value = scalar.unicodeScalars.first!.value
+        #expect(result.contains("a\\u{" + String(value, radix: 16, uppercase: true) + "}b"))
+        #expect(!result.contains(scalar))
+    }
+
+    @Test func aNormalSpaceAndLettersWithDiacriticsAreLeftAlone() throws {
+        let result = try text(request(args: ["zażółć gęślą"]))
+        #expect(result.contains("'zażółć gęślą'"))
     }
 }

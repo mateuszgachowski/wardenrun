@@ -12,15 +12,19 @@ public struct ApprovalRequest: Sendable {
     public var executableIsWritable: Bool
     /// The hash of this executable at the last approval for this item, if there was one.
     public var previousHash: String?
+    /// Where the secret goes, as `$VAR`, `file $VAR` and `stdin`, in command-line order. Only what
+    /// the flags name: the variables an item provides by itself are not known before the fetch.
+    public var injections: [String]
 
     public init(item: String, executable: ResolvedExecutable, parent: String?, callerEnvironment: [String: String],
-                executableIsWritable: Bool, previousHash: String?) {
+                executableIsWritable: Bool, previousHash: String?, injections: [String] = []) {
         self.item = item
         self.executable = executable
         self.parent = parent
         self.callerEnvironment = callerEnvironment
         self.executableIsWritable = executableIsWritable
         self.previousHash = previousHash
+        self.injections = injections
     }
 }
 
@@ -53,11 +57,13 @@ public enum ApprovalTextBuilder {
         if isShellWithCommandString(name: name, arguments: arguments) { tags.append("[shell -c]") }
         if networkTools.contains(name) { tags.append("[network]") }
         if envDumpTools.contains(name) { tags.append("[env dump]") }
-        if [executable.path, executable.argv.first ?? "", request.item].contains(where: hasNonASCII) { tags.append("[non-ASCII]") }
+        // Every argument counts: a look-alike letter in a host name sends the secret somewhere else.
+        if ([executable.path, request.item] + executable.argv).contains(where: hasNonASCII) { tags.append("[non-ASCII]") }
         for variable in EnvPolicy.riskyVariables(in: request.callerEnvironment) { tags.append("[env: \(TextEscaping.escape(variable))]") }
 
         var parts = tags
-        parts.append("use secret \"\(TextEscaping.escape(request.item, quoting: true))\" to run: \(quoteArgument(executable.path))")
+        let target = request.injections.isEmpty ? "" : " as " + request.injections.map { TextEscaping.escape($0) }.joined(separator: ", ")
+        parts.append("use secret \"\(TextEscaping.escape(request.item, quoting: true))\"\(target) to run: \(quoteArgument(executable.path))")
         for argument in arguments { parts.append(quoteArgument(argument)) }
         if let parent = request.parent { parts.append("(from \(TextEscaping.escape(parent)))") }
         parts.append("[end]")

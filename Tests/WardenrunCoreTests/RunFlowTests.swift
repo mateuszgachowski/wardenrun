@@ -46,6 +46,7 @@ private final class Rig: @unchecked Sendable {
     private(set) var spawnedNeedleCount = 0
     private(set) var fileContentsAtSpawn: [String: String] = [:]
     private(set) var fileModeAtSpawn: Int?
+    private(set) var entriesWhenFinishedWasWritten: [String]?
 
     func steps() -> RunSteps {
         RunSteps(
@@ -101,7 +102,13 @@ private final class Rig: @unchecked Sendable {
                 if let spawnError { throw spawnError }
                 return childResult
             },
-            audit: { [self] event in lock.lock(); _audits.append(event); lock.unlock(); note("audit:\(event.event.rawValue)") },
+            audit: { [self] event in
+                lock.lock(); _audits.append(event); lock.unlock()
+                note("audit:\(event.event.rawValue)")
+                if event.event == .finished {
+                    entriesWhenFinishedWasWritten = (try? FileManager.default.contentsOfDirectory(atPath: secretFilesParent)) ?? ["unreadable"]
+                }
+            },
             warn: { [self] text in lock.lock(); _warnings.append(text); lock.unlock(); note("warn") })
     }
 }
@@ -411,6 +418,52 @@ struct RunFlowTests {
         try withRig { rig in
             rig.spawnError = ChildError.spawnFailed(errno: ENOENT)
             #expect(RunFlow.run(rig.options, rig.steps()) == 127)
+        }
+    }
+
+    @Test func theApprovalTextAndTheAuditLineSayWhereTheSecretGoes() throws {
+        try withRig { rig in
+            rig.options.env = [FieldBinding(name: "API_TOKEN", field: "password")]
+            rig.options.files = [FieldBinding(name: "CERT_FILE", field: "password")]
+            rig.options.stdin = "password"
+            _ = RunFlow.run(rig.options, rig.steps())
+            #expect(rig.approvedText?.contains("use secret \"it-github\" as $API_TOKEN, file $CERT_FILE, stdin to run: ") == true)
+            let approved = try #require(rig.audits.first { $0.event == .approved })
+            #expect(approved.injected == ["$API_TOKEN", "file $CERT_FILE", "stdin"])
+        }
+    }
+
+    @Test func withoutFlagsNothingIsClaimedAboutTheTargets() throws {
+        try withRig { rig in
+            _ = RunFlow.run(rig.options, rig.steps())
+            #expect(rig.approvedText?.contains(" as ") == false)
+            #expect(rig.audits.first?.injected == nil)
+        }
+    }
+
+    @Test func theSecretFilesAreGoneBeforeTheFinishedLineIsWritten() throws {
+        try withRig { rig in
+            rig.options.files = [FieldBinding(name: "KEY_FILE", field: "password")]
+            #expect(RunFlow.run(rig.options, rig.steps()) == 0)
+            #expect(rig.fileContentsAtSpawn["KEY_FILE"] == "P4SSWORD-VALUE")
+            #expect(rig.entriesWhenFinishedWasWritten == [], "\(String(describing: rig.entriesWhenFinishedWasWritten))")
+        }
+    }
+
+    @Test func notBeingAbleToMakeAPipeIsAnOrdinaryFailureNotACommandThatCannotRun() throws {
+        try withRig { rig in
+            rig.spawnError = ChildError.pipeFailed(errno: EMFILE)
+            #expect(RunFlow.run(rig.options, rig.steps()) == 1)
+            #expect(rig.audits.map(\.event) == [.approved, .error])
+        }
+    }
+
+    @Test func anExitStatusThatCannotBeCollectedIsAFailureOfWardenrunWithOneSentence() throws {
+        try withRig { rig in
+            rig.spawnError = ChildError.waitFailed(errno: ECHILD)
+            #expect(RunFlow.run(rig.options, rig.steps()) == 1)
+            #expect(rig.warnings.first?.contains("exit status could not be collected") == true)
+            #expect(rig.audits.map(\.event) == [.approved, .error])
         }
     }
 

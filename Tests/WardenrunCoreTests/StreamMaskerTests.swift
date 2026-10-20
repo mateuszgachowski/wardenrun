@@ -56,14 +56,14 @@ struct StreamMaskerTests {
         #expect(text(out) == "tail [REDACTED:x]")
     }
 
-    @Test func holdsBackExactlyTheLongestNeedleMinusOne() {
+    @Test func holdsBackExactlyTheTailThatCouldStillBecomeANeedle() {
         let masker = StreamMasker(needles: [needle("0123456789ab")])   // 12 bytes
-        #expect(masker.feed(bytes("zz")).isEmpty)
+        #expect(masker.feed(bytes("zz")) == bytes("zz"))
+        #expect(masker.feed(bytes("0123456789a")).isEmpty, "eleven bytes of the needle stay inside")
+        #expect(text(masker.feed(bytes("x"))) == "0123456789ax")
         let masker2 = StreamMasker(needles: [needle("0123456789ab")])
-        let released = masker2.feed([UInt8](repeating: UInt8(ascii: "z"), count: 20))
-        #expect(released.count == 20 - 11)
-        #expect(masker2.finish().count == 11)
-        #expect(text(masker.finish()) == "zz")
+        #expect(text(masker2.feed(bytes("zzzz0123"))) == "zzzz")
+        #expect(text(masker2.finish()) == "0123")
     }
 
     @Test func theLongerNeedleWinsWhenOneIsAPrefixOfTheOther() {
@@ -120,5 +120,42 @@ struct StreamMaskerTests {
             #expect(runChunked(input, needles: plan.needles, sizes: [1]) == whole, "round \(round), byte by byte")
             for n in plan.needles { #expect(!occurs(n.bytes, in: whole), "round \(round) leaked \(text(n.bytes))") }
         }
+    }
+
+    @Test func aPromptThatCannotStartANeedleIsReleasedAtOnce() {
+        let masker = StreamMasker(needles: [needle("0123456789012345678901234567890123456789")])
+        #expect(text(masker.feed(bytes("Enter a value: "))) == "Enter a value: ")
+    }
+
+    @Test func onlyAPrefixOfANeedleIsHeldBack() {
+        let masker = StreamMasker(needles: [needle("SECRETSECRET1234", as: "k")])
+        #expect(text(masker.feed(bytes("abc SECR"))) == "abc ")
+        #expect(text(masker.feed(bytes("ETSECRET1234 end"))) == "[REDACTED:k] end")
+        #expect(text(masker.finish()) == "")
+    }
+
+    @Test func aHeldPrefixThatTurnsOutToBeOrdinaryTextIsReleasedWithTheNextBytes() {
+        let masker = StreamMasker(needles: [needle("SECRETSECRET1234")])
+        #expect(text(masker.feed(bytes("SECR"))) == "")
+        #expect(text(masker.feed(bytes("ET is not it"))) == "SECRET is not it")
+    }
+
+    @Test func aShorterNeedleWaitsWhileALongerOneCanStillMatch() {
+        let masker = StreamMasker(needles: [needle("AB", as: "short"), needle("ABCD", as: "long")])
+        #expect(text(masker.feed(bytes("xAB"))) == "x")
+        #expect(text(masker.feed(bytes("Z"))) == "[REDACTED:short]Z")
+        let again = StreamMasker(needles: [needle("AB", as: "short"), needle("ABCD", as: "long")])
+        #expect(text(again.feed(bytes("xAB")) + again.feed(bytes("CD!"))) == "x[REDACTED:long]!")
+    }
+
+    @Test func aCompleteMatchIsReplacedAtOnceWhenNothingLongerCanFollow() {
+        let masker = StreamMasker(needles: [needle("SECRETSECRET1234", as: "k")])
+        #expect(text(masker.feed(bytes("x SECRETSECRET1234"))) == "x [REDACTED:k]")
+    }
+
+    @Test func whatIsLeftAtTheEndIsReleasedByFinish() {
+        let masker = StreamMasker(needles: [needle("SECRETSECRET1234")])
+        #expect(text(masker.feed(bytes("tail SECR"))) == "tail ")
+        #expect(text(masker.finish()) == "SECR")
     }
 }

@@ -90,9 +90,14 @@ public enum RunFlow {
             return RunExit.failed
         }
         let context = steps.context()
+        // Where the flags send the secret: shown on the sheet and written to the log, because the
+        // sheet shows the program and a program can be made to put a variable's value anywhere.
+        let injections = options.env.map { "$" + $0.name } + options.files.map { "file $" + $0.name }
+            + (options.stdin == nil ? [] : ["stdin"])
         func event(_ kind: AuditEventKind) -> AuditEvent {
             AuditEvent(event: kind, item: options.item, commandLine: executable.argv, executable: executable.path,
-                       executableSHA256: executable.sha256, cwd: context.cwd, parentChain: context.parentChain)
+                       executableSHA256: executable.sha256, cwd: context.cwd, parentChain: context.parentChain,
+                       injected: injections.isEmpty ? nil : injections)
         }
 
         // The protected item is read before anything is asked: no setup means no question.
@@ -116,7 +121,8 @@ public enum RunFlow {
         let request = ApprovalRequest(item: options.item, executable: executable, parent: ParentDescription.pick(context.parentChain),
                                       callerEnvironment: context.callerEnvironment,
                                       executableIsWritable: context.executableIsWritable(executable.path),
-                                      previousHash: steps.previousHash(options.item, executable.path))
+                                      previousHash: steps.previousHash(options.item, executable.path),
+                                      injections: injections)
         let text: String
         do {
             text = try ApprovalTextBuilder.text(for: request)
@@ -191,6 +197,8 @@ public enum RunFlow {
 
         var plainEnvironment = context.callerEnvironment
         let secretFiles: SecretFiles? = plan.files.isEmpty ? nil : steps.makeSecretFiles()
+        // Whatever happens next, the files go before anything else is written or waited for (the
+        // audit line below can take a moment); `removeAll` may be called twice.
         defer { secretFiles?.removeAll() }
         if let secretFiles {
             do {
@@ -214,13 +222,20 @@ public enum RunFlow {
         do {
             result = try steps.spawn(executable, plainEnvironment, plan.environment, stdin, masks.needles)
         } catch let error as ChildError {
+            secretFiles?.removeAll()
             steps.warn(describe(error))
             steps.audit(event(.error))
-            if case .spawnFailed(let code) = error, code == ENOENT { return RunExit.notFound }
-            return RunExit.notExecutable
+            switch error {
+            case .spawnFailed(let code) where code == ENOENT: return RunExit.notFound
+            case .spawnFailed: return RunExit.notExecutable
+            case .pipeFailed, .waitFailed: return RunExit.failed   // wardenrun's own failure, not the command's
+            }
         } catch {
+            secretFiles?.removeAll()
             return fail(error)
         }
+        secretFiles?.removeAll()
+        plan.wipe()
         steps.audit(AuditEvent(event: .finished, item: options.item, executable: executable.path,
                                exitStatus: result.exitCode, durationMs: Int((result.duration * 1000).rounded())))
         return result.exitCode
@@ -263,6 +278,7 @@ public enum RunFlow {
             switch error {
             case .spawnFailed(let code): return "the command could not be started (error \(code))"
             case .pipeFailed(let code): return "the command could not be started: no pipe (error \(code))"
+            case .waitFailed(let code): return "the command's exit status could not be collected (error \(code))"
             }
         case is EnvPolicyError:
             return "an environment variable name is not allowed"

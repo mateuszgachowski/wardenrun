@@ -201,6 +201,53 @@ struct AuditLogTests {
             #expect(line == 1)
         }
     }
+
+    @Test func anEventCanNameWhereTheSecretWentAndNothingElse() throws {
+        try withTempDirectory { dir in
+            var event = sample()
+            event.injected = ["$GIT_DIR", "file $CERT", "stdin"]
+            try log(dir).append(event)
+            try log(dir).append(sample())
+            let lines = try fileLines(dir)
+            #expect(try object(lines[0])["injected"] as? [String] == ["$GIT_DIR", "file $CERT", "stdin"])
+            #expect(try object(lines[1])["injected"] == nil)
+        }
+    }
+
+    @Test func appendGivesUpWhenAnotherHolderKeepsTheLock() throws {
+        try withTempDirectory { dir in
+            let audit = AuditLog(path: path(dir), redactor: { $0 }, clock: Self.epoch, lockTimeout: 0.3)
+            try audit.append(sample())
+            let holder = open(path(dir), O_RDWR)
+            #expect(holder >= 0)
+            defer { close(holder) }
+            #expect(flock(holder, LOCK_EX) == 0)
+            let started = Date()
+            do {
+                try audit.append(sample("beta"))
+                Issue.record("expected the append to give up")
+            } catch let error as AuditLogError {
+                #expect(error == .cannotWrite(errno: EWOULDBLOCK))
+            }
+            #expect(Date().timeIntervalSince(started) < 3)
+            flock(holder, LOCK_UN)
+            try audit.append(sample("gamma"))
+            #expect(try AuditLog.verify(path: path(dir)) == .ok(lines: 2))
+        }
+    }
+
+    @Test func appendWaitsForALockThatIsReleasedSoon() throws {
+        try withTempDirectory { dir in
+            let audit = AuditLog(path: path(dir), redactor: { $0 }, clock: Self.epoch, lockTimeout: 5)
+            try audit.append(sample())
+            let holder = open(path(dir), O_RDWR)
+            defer { close(holder) }
+            #expect(flock(holder, LOCK_EX) == 0)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { flock(holder, LOCK_UN) }
+            try audit.append(sample("beta"))
+            #expect(try AuditLog.verify(path: path(dir)) == .ok(lines: 2))
+        }
+    }
 }
 
 final class Counter: @unchecked Sendable {

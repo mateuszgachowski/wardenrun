@@ -112,6 +112,28 @@ struct CommandSupportTests {
 
 @Suite(.serialized)
 struct SignalWatchTests {
+    @Test func stoppingWithoutRestoringLeavesTheNewHandlerUntilTheOriginalsAreAskedFor() {
+        var handler = sigaction()
+        handler.__sigaction_u.__sa_sigaction = { _, _, _ in }
+        handler.sa_flags = SA_SIGINFO
+        sigemptyset(&handler.sa_mask)
+        let watch = SignalWatch(signals: [SIGUSR2]) { _ in }
+        sigaction(SIGUSR2, &handler, nil)                 // what ChildRunner does before the hand-over
+        watch.stop(restoreHandlers: false)
+        var current = sigaction()
+        sigaction(SIGUSR2, nil, &current)
+        #expect((current.sa_flags & SA_SIGINFO) != 0, "the runner's handler survived the hand-over")
+        watch.restoreOriginals()
+        sigaction(SIGUSR2, nil, &current)
+        #expect((current.sa_flags & SA_SIGINFO) == 0, "the original disposition is back")
+    }
+
+    @Test func theDefaultSetIsEveryForwardedSignal() {
+        // Until the command exists, QUIT, USR1 and USR2 would otherwise kill wardenrun with a
+        // secret file on disk and an unlocked bw behind it.
+        #expect(Set(SignalWatch.defaultSignals) == Set(ChildRunner.forwardedSignals))
+    }
+
     @Test func aSignalWhileWatchingIsReportedAndDoesNotKillTheProcess() throws {
         let count = Box(0)
         let watch = SignalWatch(signals: [SIGUSR2]) { _ in count.value += 1 }
@@ -169,6 +191,29 @@ struct VaultSessionTests {
         #expect(cancelled)
         #expect(session.end())
         #expect(!session.end(), "reported once")
+    }
+
+    @Test func handingOverLeavesTheRunnersHandlersAndThePlainEndPutsTheOriginalsBack() throws {
+        func disposition() -> Int {
+            var current = sigaction()
+            sigaction(SIGUSR2, nil, &current)
+            return unsafeBitCast(current.__sigaction_u.__sa_handler, to: Int.self)
+        }
+        let session = VaultSession()
+        session.begin(nil)
+        #expect(disposition() == 1, "the watch ignores the signal and listens through a dispatch source")
+        // what ChildRunner does between the watch and the hand-over
+        var runner = sigaction()
+        runner.__sigaction_u.__sa_sigaction = { _, _, _ in }
+        runner.sa_flags = SA_SIGINFO
+        sigemptyset(&runner.sa_mask)
+        sigaction(SIGUSR2, &runner, nil)
+        #expect(!session.end(handingOver: true))
+        var current = sigaction()
+        sigaction(SIGUSR2, nil, &current)
+        #expect((current.sa_flags & SA_SIGINFO) != 0, "the runner's handler was not overwritten by the watch's old one")
+        #expect(!session.end())
+        #expect(disposition() == 0, "back to the default once the run is over")
     }
 
     @Test func noInterruptMeansEndSaysSo() throws {
