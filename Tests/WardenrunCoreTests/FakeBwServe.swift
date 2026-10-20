@@ -5,12 +5,12 @@ import Foundation
 
 final class FakeHandle: BwServeHandle, @unchecked Sendable {
     let descriptor: Int32
-    let standardError: [UInt8]
+    let printed: [UInt8]
     let terminated = Box(false)
 
-    init(descriptor: Int32, standardError: [UInt8] = []) {
+    init(descriptor: Int32, printed: [UInt8] = []) {
         self.descriptor = descriptor
-        self.standardError = standardError
+        self.printed = printed
     }
 
     func terminate(grace: TimeInterval) { terminated.value = true }
@@ -32,7 +32,7 @@ final class FakeServe: BwServeLauncher, @unchecked Sendable {
     var createdID = "new-item-id"
     var overrides: [String: String] = [:]     // "POST /sync" -> a raw reply, or "SILENT"
     var launchError: BwError?
-    var standardError = ""
+    var printed = ""
     var closeAtOnce = false
 
     var seen: [Seen] { seenBox.value }
@@ -42,7 +42,7 @@ final class FakeServe: BwServeLauncher, @unchecked Sendable {
     func launch() throws -> BwServeHandle {
         if let launchError { throw launchError }
         let (client, server) = try SocketPair.make()
-        let handle = FakeHandle(descriptor: client, standardError: Array(standardError.utf8))
+        let handle = FakeHandle(descriptor: client, printed: Array(printed.utf8))
         handles.value.append(handle)
         let behaviour = self
         Thread.detachNewThread {
@@ -63,6 +63,12 @@ final class FakeServe: BwServeLauncher, @unchecked Sendable {
             let method = String(line[0]), target = String(line[1])
             seenBox.value.append(Seen(method: method, target: target, body: request.body))
             let path = String(target.prefix { $0 != "?" })
+            // Like the real thing: only `localhost:<port>` is let in (DNS-rebinding guard), no Origin.
+            let headers = request.head.components(separatedBy: "\r\n").map { $0.lowercased() }
+            if !headers.contains("host: localhost:8087") || headers.contains(where: { $0.hasPrefix("origin:") }) {
+                writeAll(fd, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                continue
+            }
             if let override = overrides[method + " " + path] {
                 if override == "SILENT" { drainUntilClosed(fd); return }
                 writeAll(fd, override)

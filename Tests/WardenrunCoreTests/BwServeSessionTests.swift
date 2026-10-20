@@ -245,7 +245,7 @@ struct BwServeSessionTests {
     @Test func aServeThatExitsBecauseNobodyIsLoggedInGivesNotLoggedIn() throws {
         let fake = FakeServe()
         fake.closeAtOnce = true
-        fake.standardError = "You are not logged in."
+        fake.printed = "You are not logged in."
         let session = BwServeSession(launcher: fake)
         #expect(throws: BwError.notLoggedIn) { try session.start() }
         #expect(fake.handle?.terminated.value == true)
@@ -254,7 +254,7 @@ struct BwServeSessionTests {
     @Test func aServeThatExitsForAnyOtherReasonIsAFixedProtocolError() throws {
         let fake = FakeServe()
         fake.closeAtOnce = true
-        fake.standardError = "something with SECRET123 in it"
+        fake.printed = "something with SECRET123 in it"
         let session = BwServeSession(launcher: fake)
         do {
             try session.start()
@@ -317,6 +317,6 @@ struct BwServeSessionTests {
             if count <= 0 { break }
             text += String(decoding: buffer[0..<count], as: UTF8.self)
         }
-        #expect(text == "serve --hostname fd+connected://3 --nointeraction ")
+        #expect(text == "serve --hostname fd+connected://3 --port 8087 --nointeraction ")
     }
 }

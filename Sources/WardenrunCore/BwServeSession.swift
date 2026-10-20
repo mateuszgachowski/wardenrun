@@ -20,8 +20,8 @@ public struct BwTimeouts: Equatable, Sendable {
 /// A running `bw serve`: the descriptor wardenrun's end of its socket, and a way to end it.
 public protocol BwServeHandle: AnyObject {
     var descriptor: Int32 { get }
-    /// What the process wrote to stderr. Read only after the connection failed.
-    var standardError: [UInt8] { get }
+    /// Everything the process printed (stderr and stdout). Read only after the connection failed.
+    var printed: [UInt8] { get }
     func terminate(grace: TimeInterval)
 }
 
@@ -33,7 +33,8 @@ public protocol BwServeLauncher: Sendable {
 /// network: the only client is the descriptor wardenrun keeps.
 public struct BwProcessServeLauncher: BwServeLauncher {
     /// The child's end of the socket is descriptor 3. Settled by the spike (DESIGN §5.2.6).
-    static let arguments = ["serve", "--hostname", "fd+connected://3", "--nointeraction"]
+    static let arguments = ["serve", "--hostname", "fd+connected://3", "--port", String(BwServeSession.port),
+                            "--nointeraction"]
 
     let spec: BwLaunchSpec
     let environment: [String: String]
@@ -68,9 +69,9 @@ final class BwProcessServeHandle: BwServeHandle, @unchecked Sendable {
         self.descriptor = descriptor
     }
 
-    var standardError: [UInt8] {
+    var printed: [UInt8] {
         _ = child.waitForOutput(timeout: 1)
-        return child.capturedStderr
+        return child.capturedStderr + child.capturedStdout
     }
 
     func terminate(grace: TimeInterval) { child.terminate(grace: grace) }
@@ -85,6 +86,11 @@ final class BwProcessServeHandle: BwServeHandle, @unchecked Sendable {
 /// Use from one thread. `cancel()` may be called from any thread; `close()` may be called more
 /// than once and runs on deinit.
 public final class BwServeSession: @unchecked Sendable {
+    /// `bw serve` accepts a request only when `Host` is `localhost:<its port>` (8087 unless told
+    /// otherwise). No port is opened for `fd+connected://`, but the check still runs.
+    static let port = 8087
+    static let hostHeader = "localhost:\(port)"
+
     private let launcher: BwServeLauncher
     private let timeouts: BwTimeouts
     private let state = NSLock()
@@ -123,7 +129,7 @@ public final class BwServeSession: @unchecked Sendable {
             close()
             throw error
         }
-        let http = LocalHTTPClient(descriptor: launched.descriptor)
+        let http = LocalHTTPClient(descriptor: launched.descriptor, host: Self.hostHeader)
         let raced = state.withLock { () -> Bool in
             handle = launched
             client = http
@@ -153,7 +159,7 @@ public final class BwServeSession: @unchecked Sendable {
     private func explainStartFailure(_ error: Error, _ launched: BwServeHandle) -> Error {
         guard case BwError.protocolError(let text) = error,
               text == "connection closed by server" || text == "reply ended early" else { return error }
-        let said = String(decoding: launched.standardError, as: UTF8.self).lowercased()
+        let said = String(decoding: launched.printed, as: UTF8.self).lowercased()
         if said.contains("not logged in") { return BwError.notLoggedIn }
         return BwError.protocolError("bw serve did not start")
     }

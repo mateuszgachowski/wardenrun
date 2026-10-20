@@ -19,8 +19,8 @@ private final class FakeServer: @unchecked Sendable {
     }
 
     /// Hands out a client, closes it afterwards and waits for the script to end.
-    func run<R>(maxBody: Int = 1 << 20, _ body: (LocalHTTPClient) throws -> R) rethrows -> R {
-        let client = LocalHTTPClient(descriptor: clientFD, maxBody: maxBody)
+    func run<R>(maxBody: Int = 1 << 20, host: String = "localhost", _ body: (LocalHTTPClient) throws -> R) rethrows -> R {
+        let client = LocalHTTPClient(descriptor: clientFD, maxBody: maxBody, host: host)
         defer {
             client.close()
             _ = group.wait(timeout: .now() + 10)
@@ -44,6 +44,16 @@ struct LocalHTTPTests {
         }
         try server.run { client in _ = try client.send(method: "GET", path: "/status", body: nil, deadline: 5) }
         #expect(seen.value == "GET /status HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\r\n")
+    }
+
+    @Test func theHostHeaderIsWhatTheCallerAsksFor() throws {
+        let seen = Box<String?>(nil)
+        let server = try FakeServer { fd in
+            seen.value = readRequest(fd)?.head
+            writeAll(fd, okReply("{}"))
+        }
+        try server.run(host: "localhost:8087") { client in _ = try client.send(method: "GET", path: "/status", body: nil, deadline: 5) }
+        #expect(seen.value == "GET /status HTTP/1.1\r\nHost: localhost:8087\r\nAccept: application/json\r\n\r\n")
     }
 
     @Test func aPostWithoutABodyAnnouncesAZeroLength() throws {

@@ -26,14 +26,18 @@ public final class LocalHTTPClient: @unchecked Sendable {
 
     private let descriptor: Int32
     private let maxBody: Int
+    private let host: String
     private let state = NSLock()
     private var cancelled = false
     private var closed = false
     private var broken = false
 
-    public init(descriptor: Int32, maxBody: Int = 32 << 20) {
+    /// `host` is what the `Host` header says. `bw serve` refuses any value but its own
+    /// `localhost:<port>` forms (DNS-rebinding guard), so the caller passes the port it started it with.
+    public init(descriptor: Int32, maxBody: Int = 32 << 20, host: String = "localhost") {
         self.descriptor = descriptor
         self.maxBody = maxBody
+        self.host = host
         // Non-blocking, so that a peer that stops reading cannot hold a write past the deadline.
         let flags = fcntl(descriptor, F_GETFL)
         if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
@@ -86,7 +90,7 @@ public final class LocalHTTPClient: @unchecked Sendable {
     }
 
     private func writeRequest(method: String, path: String, body: SecretBuffer?, limit: Date) throws {
-        var head = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n"
+        var head = "\(method) \(path) HTTP/1.1\r\nHost: \(host)\r\nAccept: application/json\r\n"
         if let body {
             head += "Content-Type: application/json\r\nContent-Length: \(body.count)\r\n"
         } else if method != "GET" && method != "HEAD" {
