@@ -10,6 +10,9 @@ public enum TerminalError: Error, Equatable, Sendable {
     case endOfInput
     /// More than 1024 bytes. Longer input is refused, never cut.
     case tooLong
+    /// A control key other than Enter, Backspace, Ctrl-U, Ctrl-C and Ctrl-D (Tab, say). Dropping
+    /// it silently would store a password different from the one the person thinks they typed.
+    case controlCharacter
     case ioFailed
 }
 
@@ -66,15 +69,22 @@ public enum Terminal {
 
         var length = 0
         var failure: TerminalError?
+        // The byte after a lone Esc belongs to the password (or to the next key), not to the Esc.
+        var pending: UInt8?
         read: while true {
             var byte: UInt8 = 0
-            let count = Darwin.read(input, &byte, 1)
-            if count < 0 {
-                if errno == EINTR { continue }
-                failure = errno == EIO ? .endOfInput : .ioFailed
-                break
+            if let carried = pending {
+                byte = carried
+                pending = nil
+            } else {
+                let count = Darwin.read(input, &byte, 1)
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    failure = errno == EIO ? .endOfInput : .ioFailed
+                    break
+                }
+                if count == 0 { failure = .endOfInput; break }
             }
-            if count == 0 { failure = .endOfInput; break }
             switch byte {
             case 0x0A, 0x0D:
                 break read
@@ -94,10 +104,16 @@ public enum Terminal {
                         if !wasContinuation { break }
                     }
                 }
+            case 0x15:   // Ctrl-U: start the line again
+                staging.withUnsafeMutableBytes { bytes in
+                    for index in 0..<length { bytes[index] = 0 }
+                }
+                length = 0
             case 0x1B:
-                skipEscapeSequence(from: input)
+                pending = skipEscapeSequence(from: input)
             case 0x00..<0x20:
-                continue read   // other control characters are not part of a password
+                failure = .controlCharacter
+                break read
             default:
                 if length >= maximumLength {
                     failure = .tooLong
@@ -115,13 +131,27 @@ public enum Terminal {
         }
     }
 
-    /// After ESC: `[` or `O`, parameters, and one final byte. Arrow and function keys end up here.
-    private static func skipEscapeSequence(from input: Int32) {
-        var byte: UInt8 = 0
-        guard Darwin.read(input, &byte, 1) == 1, byte == 0x5B || byte == 0x4F else { return }
-        while Darwin.read(input, &byte, 1) == 1 {
-            if byte >= 0x40 && byte <= 0x7E { return }
+    /// After ESC: `[` or `O`, parameters, and one final byte (arrow and function keys) are skipped.
+    /// A lone Esc is told by a tenth of a second of silence; any other byte after it is given
+    /// back to be handled as the key it is.
+    private static func skipEscapeSequence(from input: Int32) -> UInt8? {
+        var quick = termios()
+        guard tcgetattr(input, &quick) == 0 else { return nil }
+        let waiting = quick
+        quick.c_cc.16 = 0   // VMIN
+        quick.c_cc.17 = 1   // VTIME: tenths of a second
+        guard tcsetattr(input, TCSANOW, &quick) == 0 else { return nil }
+        defer {
+            var again = waiting
+            tcsetattr(input, TCSANOW, &again)
         }
+        var byte: UInt8 = 0
+        guard Darwin.read(input, &byte, 1) == 1 else { return nil }
+        guard byte == 0x5B || byte == 0x4F else { return byte }
+        while Darwin.read(input, &byte, 1) == 1 {
+            if byte >= 0x40 && byte <= 0x7E { return nil }
+        }
+        return nil
     }
 
     private static func writeAll(_ descriptor: Int32, _ text: String) {

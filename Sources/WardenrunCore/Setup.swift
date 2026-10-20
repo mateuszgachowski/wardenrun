@@ -34,6 +34,9 @@ public enum SetupError: Error, Equatable, Sendable {
     case bwFailed(step: String)
     case verifyFailed(summary: String)
     case installFailed(reason: String)
+    /// There was no way to ask a human (no Touch ID, no screen session). `reason` is one of the
+    /// approver's fixed sentences.
+    case approvalUnavailable(reason: String)
 
     public var message: String {
         switch self {
@@ -42,9 +45,12 @@ public enum SetupError: Error, Equatable, Sendable {
         case .denied: return "setup was not approved"
         case .invalid(let field): return "the \(field) is missing or not acceptable"
         case .approvalTextTooLong: return "the settings are too long to show in one approval; nothing was changed"
-        case .bwFailed(let step): return "bw failed at the step \"\(step)\"; nothing was saved"
+        case .bwFailed(let step):
+            let hint = step == "login" ? " (check the password; an account with two-step login is not supported yet)" : ""
+            return "bw failed at the step \"\(step)\"\(hint); nothing was saved"
         case .verifyFailed(let summary): return "the login did not check out (\(summary)); nothing was saved"
         case .installFailed(let reason): return "bw could not be installed: \(reason)"
+        case .approvalUnavailable(let reason): return "no approval was possible (\(reason)); nothing was changed"
         }
     }
 }
@@ -62,7 +68,9 @@ public enum Setup {
     /// All validation of the typed values, with the field named when one fails.
     public static func makeConfig(_ input: SetupInput) throws -> ProtectedConfig {
         let email = input.email
-        guard !email.isEmpty, email.contains("@"), !email.unicodeScalars.contains(where: { $0.properties.isWhitespace || $0.value < 0x20 }) else {
+        // Printable ASCII only: the e-mail is shown in the approval text, and look-alike, invisible
+        // and bidirectional characters have no place in an account name.
+        guard !email.isEmpty, email.contains("@"), email.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else {
             throw SetupError.invalid(field: "email")
         }
         // `bw --passwordfile` reads one line, so a newline in the password would silently shorten it.
@@ -96,27 +104,46 @@ public enum Setup {
     // MARK: approval text
 
     /// What the Touch ID sheet says: the new values next to the old ones, never the password.
-    public static func approvalText(old: ProtectedConfig?, new: ProtectedConfig) throws -> String {
-        func line(_ label: String, _ newValue: String, _ oldValue: String?) -> String {
-            guard let oldValue else { return "\(label): \(newValue)" }
-            return oldValue == newValue ? "\(label): \(newValue) (unchanged)" : "\(label): \(newValue) (was: \(oldValue))"
+    /// Every value is escaped; `replacesUnreadable` says that an item exists that this build cannot
+    /// read and is about to be replaced.
+    public static func approvalText(old: ProtectedConfig?, new: ProtectedConfig, replacesUnreadable: Bool = false) throws -> String {
+        func shown(_ value: String) -> String { TextEscaping.escape(value) }
+        func line(_ label: String, _ newValue: String, _ oldValue: String?, elideSame: Bool) -> String {
+            guard let oldValue else { return "\(label): \(shown(newValue))" }
+            if oldValue == newValue { return elideSame ? "\(label): unchanged" : "\(label): \(shown(newValue)) (unchanged)" }
+            return "\(label): \(shown(newValue)) (was: \(shown(oldValue)))"
         }
         func pinText(_ config: ProtectedConfig) -> String {
             switch config.bwPin {
             case .signedRelease(let team, let path): return "team \(team) \(path)"
             }
         }
-        var lines = [old == nil ? "First setup: there is no previous value."
-                                : "Change the stored vault settings. Old values in brackets."]
-        lines.append(line("server", new.serverURL.absoluteString, old?.serverURL.absoluteString))
-        lines.append(line("account", new.accountEmail, old?.accountEmail))
-        lines.append(line("organization", new.organizationID, old?.organizationID))
-        lines.append(line("collections", new.collectionIDs.joined(separator: ", "), old?.collectionIDs.joined(separator: ", ")))
-        lines.append(line("bw", pinText(new), old.map(pinText)))
-        if old == nil { lines[0] = "First setup: there is no previous value." }
-        let text = lines.joined(separator: "\n")
-        guard text.count <= approvalBudget else { throw SetupError.approvalTextTooLong }
-        return text
+        let header: String
+        if old != nil {
+            header = "Change vault settings (old values as \"was\")."
+        } else if replacesUnreadable {
+            header = "A stored item this build cannot read will be replaced."
+        } else {
+            header = "First setup: there is no previous value."
+        }
+        func build(elideSame: Bool) -> String {
+            var lines = [header]
+            lines.append(line("server", new.serverURL.absoluteString, old?.serverURL.absoluteString, elideSame: elideSame))
+            lines.append(line("account", new.accountEmail, old?.accountEmail, elideSame: elideSame))
+            lines.append(line("organization", new.organizationID, old?.organizationID, elideSame: elideSame))
+            lines.append(line("collections", new.collectionIDs.joined(separator: ", "), old?.collectionIDs.joined(separator: ", "), elideSame: elideSame))
+            lines.append(line("bw", pinText(new), old.map(pinText), elideSame: elideSame))
+            lines.append(line("proxy", new.httpsProxy ?? "none", old.map { $0.httpsProxy ?? "none" }, elideSame: elideSame))
+            lines.append(line("CA file", new.nodeExtraCACerts ?? "none", old.map { $0.nodeExtraCACerts ?? "none" }, elideSame: elideSame))
+            return lines.joined(separator: "\n")
+        }
+        // Unchanged values are shown in full while they fit; otherwise only their label stays,
+        // so that every NEW value is still on the sheet. Over the budget either way: refused.
+        let full = build(elideSame: false)
+        if full.utf16.count <= approvalBudget { return full }
+        let compact = build(elideSame: true)
+        guard compact.utf16.count <= approvalBudget else { throw SetupError.approvalTextTooLong }
+        return compact
     }
 
     // MARK: bw
@@ -188,13 +215,22 @@ public enum Setup {
 
     /// Copies the signed release `bw` to `destination` (a directory only the user can enter),
     /// checks the copy before it takes its name and the file at its name afterwards, and returns
-    /// the pin for it. A copy that fails the check leaves the old file untouched.
+    /// the pin for it. A copy that fails the check leaves the old file untouched. A symbolic link
+    /// as the source is followed to the file it points to; the copy is always a regular file and
+    /// the source is never changed.
     public static func installBw(from source: String, teamID: String, to destination: String,
                                  signature: BwSignatureChecker) throws -> BwPin {
+        guard let resolved = realpath(source, nil) else { throw SetupError.installFailed(reason: "the bw file to copy is missing") }
+        let sourcePath = String(cString: resolved)
+        free(resolved)
+        let input = open(sourcePath, O_RDONLY | O_NOFOLLOW)
+        guard input >= 0 else { throw SetupError.installFailed(reason: "the bw file to copy is missing") }
+        defer { close(input) }
         var info = stat()
-        guard stat(source, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+        guard fstat(input, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
             throw SetupError.installFailed(reason: "the bw file to copy is missing")
         }
+
         let directory = (destination as NSString).deletingLastPathComponent
         do {
             try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
@@ -204,9 +240,25 @@ public enum Setup {
 
         let temporary = directory + "/.bw.new-" + UUID().uuidString
         defer { unlink(temporary) }
-        do { try FileManager.default.copyItem(atPath: source, toPath: temporary) } catch {
-            throw SetupError.installFailed(reason: "the bw file could not be copied")
+        let output = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o700)
+        guard output >= 0 else { throw SetupError.installFailed(reason: "the bw file could not be copied") }
+        var copied = true
+        var block = [UInt8](repeating: 0, count: 1 << 16)
+        copy: while true {
+            let count = read(input, &block, block.count)
+            if count < 0 && errno == EINTR { continue }
+            if count < 0 { copied = false; break }
+            if count == 0 { break }
+            var offset = 0
+            while offset < count {
+                let written = block.withUnsafeBytes { write(output, $0.baseAddress! + offset, count - offset) }
+                if written < 0 && errno == EINTR { continue }
+                if written <= 0 { copied = false; break copy }
+                offset += written
+            }
         }
+        let closed = close(output) == 0
+        guard copied, closed else { throw SetupError.installFailed(reason: "the bw file could not be copied") }
         guard chmod(temporary, 0o700) == 0 else { throw SetupError.installFailed(reason: "the copy could not be made executable") }
         do { try signature.check(path: temporary, teamID: teamID) } catch {
             throw SetupError.installFailed(reason: "the copy does not carry the expected signature")
@@ -217,5 +269,29 @@ public enum Setup {
             throw SetupError.installFailed(reason: "the installed file does not carry the expected signature")
         }
         return .signedRelease(teamID: teamID, path: destination)
+    }
+
+    // MARK: profile
+
+    /// Puts a `bw` profile that was logged in and verified under `staged` in place of the live
+    /// one, under `bw.lock`. The old profile is removed only after the new one has its name; if
+    /// the swap fails the live profile is as it was.
+    public static func commitProfile(staged: String, live: String, lockPath: String, timeouts: BwTimeouts) throws {
+        let lock: BwLock
+        do { lock = try BwLock.acquire(path: lockPath, timeout: timeouts.lockWait) } catch { throw SetupError.bwFailed(step: "lock") }
+        defer { lock.release() }
+        let backup = live + ".old-" + UUID().uuidString
+        let hadLive = FileManager.default.fileExists(atPath: live)
+        if hadLive, rename(live, backup) != 0 { throw SetupError.bwFailed(step: "profile") }
+        guard rename(staged, live) == 0 else {
+            if hadLive { rename(backup, live) }
+            throw SetupError.bwFailed(step: "profile")
+        }
+        if hadLive { try? FileManager.default.removeItem(atPath: backup) }
+    }
+
+    /// Removes a staged profile that was not committed. Safe to call when it is already gone.
+    public static func discardProfile(staged: String) {
+        try? FileManager.default.removeItem(atPath: staged)
     }
 }

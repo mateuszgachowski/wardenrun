@@ -20,18 +20,19 @@ public enum Hardening {
         let denied = denyAttach()
         let cores = disableCoreDumps()
         return [
-            CheckResult(name: "deny-attach", status: denied ? .ok : .fail,
-                        detail: denied ? "debuggers cannot attach" : "PT_DENY_ATTACH failed (errno \(errno))"),
+            CheckResult(name: "deny-attach", status: denied.ok ? .ok : .fail,
+                        detail: denied.ok ? "debuggers cannot attach" : "PT_DENY_ATTACH failed (errno \(denied.errno))"),
             CheckResult(name: "core-dumps", status: cores ? .ok : .fail,
                         detail: cores ? "core dumps are off" : "could not set the core limit to 0"),
         ]
     }
 
     /// `ptrace` is not exported to Swift; it is looked up in libc.
-    private static func denyAttach() -> Bool {
+    private static func denyAttach() -> (ok: Bool, errno: Int32) {
         typealias Ptrace = @convention(c) (CInt, pid_t, UnsafeMutableRawPointer?, CInt) -> CInt
-        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ptrace") else { return false }
-        return unsafeBitCast(symbol, to: Ptrace.self)(ptDenyAttach, 0, nil, 0) == 0
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ptrace") else { return (false, ENOSYS) }
+        let result = unsafeBitCast(symbol, to: Ptrace.self)(ptDenyAttach, 0, nil, 0)
+        return (result == 0, result == 0 ? 0 : errno)
     }
 
     /// Soft and hard limit to zero: an unprivileged process cannot raise the hard limit again.
@@ -81,8 +82,14 @@ public enum Hardening {
         case true?:
             results.append(CheckResult(name: "hardened-runtime", status: .ok, detail: "the hardened runtime is on"))
         case false?:
-            results.append(CheckResult(name: "hardened-runtime", status: .fail,
-                                       detail: "signed without the hardened runtime: other processes could inject code"))
+            if CodeIdentityReader.ofCurrentProcess()?.isAdHoc == true {
+                // Every SwiftPM build on Apple Silicon is signed ad hoc by the linker, without the runtime.
+                results.append(CheckResult(name: "hardened-runtime", status: .warn,
+                                           detail: "ad-hoc signature without the hardened runtime (a build from source): other processes could inject code; a release is signed with the runtime"))
+            } else {
+                results.append(CheckResult(name: "hardened-runtime", status: .fail,
+                                           detail: "signed without the hardened runtime: other processes could inject code"))
+            }
         case nil:
             results.append(CheckResult(name: "hardened-runtime", status: .warn,
                                        detail: "not signed (a development build); a release build is signed with the hardened runtime"))

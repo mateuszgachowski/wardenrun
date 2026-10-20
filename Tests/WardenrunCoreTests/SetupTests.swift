@@ -6,10 +6,10 @@ private let teamID = "LTZ2PFU5D6"
 
 private func makeConfig(server: String = "https://vault.example", email: String = "it-user@example.test",
                         org: String = "org-1", collections: [String] = ["col-a"], password: String = "master-pass-KNOWN-9",
-                        bw: String = "/opt/wardenrun/bin/bw") throws -> ProtectedConfig {
+                        bw: String = "/opt/wardenrun/bin/bw", proxy: String? = nil, ca: String? = nil) throws -> ProtectedConfig {
     try ProtectedConfig(serverURL: try #require(URL(string: server)), accountEmail: email, organizationID: org,
                         collectionIDs: collections, masterPassword: SecretBuffer(copying: Array(password.utf8)),
-                        bwPin: .signedRelease(teamID: teamID, path: bw))
+                        bwPin: .signedRelease(teamID: teamID, path: bw), nodeExtraCACerts: ca, httpsProxy: proxy)
 }
 
 struct SetupApprovalTextTests {
@@ -45,6 +45,54 @@ struct SetupApprovalTextTests {
 
     @Test func theTextBudgetIs400Characters() throws {
         #expect(Setup.approvalBudget == 400)
+    }
+
+    @Test func proxyAndExtraCertificateAreShownBecauseTheyCanRedirectTheLogin() throws {
+        let plain = try Setup.approvalText(old: nil, new: try makeConfig())
+        #expect(plain.contains("proxy: none") && plain.contains("CA file: none"))
+        let withProxy = try makeConfig(proxy: "http://proxy.example:3128", ca: "/etc/ssl/internal-ca.pem")
+        let text = try Setup.approvalText(old: try makeConfig(), new: withProxy)
+        #expect(text.contains("proxy: http://proxy.example:3128 (was: none)"))
+        #expect(text.contains("CA file: /etc/ssl/internal-ca.pem (was: none)"))
+    }
+
+    @Test func aStoredItemThatCannotBeReadIsSaidToBeReplacedNotAFirstSetup() throws {
+        let text = try Setup.approvalText(old: nil, new: try makeConfig(), replacesUnreadable: true)
+        #expect(text.lowercased().contains("cannot read"))
+        #expect(text.contains("replaced"))
+        #expect(!text.lowercased().contains("first setup"))
+        #expect(!text.contains("no previous value"))
+    }
+
+    @Test func everyValueIsEscapedSoNoneCanForgeALineOrReorderTheText() throws {
+        let evil = try makeConfig(email: "me@corp.example", proxy: "http://p.example/\u{202E}x\nforged: line")
+        let old = try makeConfig(proxy: "http://q.example/\u{2066}")
+        let text = try Setup.approvalText(old: old, new: evil)
+        #expect(text.contains("\\u{202E}x\\nforged: line"))
+        #expect(text.contains("\\u{2066}"))
+        #expect(text.split(separator: "\n").count == 8, "one line per setting plus the header: \(text)")
+        for scalar in text.unicodeScalars where scalar != "\n" {
+            #expect(scalar.value >= 0x20 && scalar.value != 0x7F)
+            #expect(scalar.properties.generalCategory != .format)
+        }
+    }
+
+    @Test func whenUnchangedValuesWouldNotFitOnlyTheirLabelsStayAndEveryNewValueIsStillShown() throws {
+        let uuid = "00000000-0000-0000-0000-000000000001"
+        let bw = "/Users/someone-with-a-long-name/.config/wardenrun/bin/bw"
+        let old = try makeConfig(org: uuid, collections: [uuid], bw: bw, proxy: "http://proxy.corp.example:3128", ca: "/etc/ssl/internal-ca.pem")
+        let new = try makeConfig(server: "https://new.vault.example", org: uuid, collections: [uuid], bw: bw,
+                                 proxy: "http://proxy.corp.example:3128", ca: "/etc/ssl/internal-ca.pem")
+        let text = try Setup.approvalText(old: old, new: new)
+        #expect(text.utf16.count <= 400)
+        #expect(text.contains("server: https://new.vault.example (was: https://vault.example)"))
+        #expect(text.contains("organization: unchanged"))
+        #expect(!text.contains(uuid), "unchanged long values are elided only when the full text does not fit")
+    }
+
+    @Test func theHeaderMatchesTheLinesBelowIt() throws {
+        let text = try Setup.approvalText(old: try makeConfig(), new: try makeConfig(server: "https://new.example"))
+        #expect(text.hasPrefix("Change vault settings (old values as \"was\")."))
     }
 }
 
@@ -101,6 +149,7 @@ struct SetupBwTests {
 
     private struct Accept: BwSignatureChecker {
         func check(path: String, teamID: String) throws {}
+        func checkRunning(pid: Int32, teamID: String) throws {}
     }
 
     private func withRig(_ body: (Rig) throws -> Void) throws {
@@ -163,7 +212,10 @@ struct SetupBwTests {
     }
 
     @Test func aSignatureThatDoesNotMatchStopsBeforeBwRuns() throws {
-        struct Refuse: BwSignatureChecker { func check(path: String, teamID: String) throws { throw BwError.signatureMismatch } }
+        struct Refuse: BwSignatureChecker {
+            func check(path: String, teamID: String) throws { throw BwError.signatureMismatch }
+            func checkRunning(pid: Int32, teamID: String) throws { throw BwError.signatureMismatch }
+        }
         try withRig { rig in
             #expect(throws: SetupError.bwFailed(step: "pin")) {
                 try Setup.configureBw(config: try config(rig), appDataDir: rig.appData, home: rig.dir + "/home",
@@ -256,6 +308,15 @@ struct SetupInputTests {
             _ = try Setup.makeConfig(input(password: "first-line\nsecond"))
         }
         #expect(throws: SetupError.invalid(field: "password")) { _ = try Setup.makeConfig(input(password: "with-cr\rtail")) }
+        #expect(throws: SetupError.invalid(field: "password"), "a NUL would end the password early") {
+            _ = try Setup.makeConfig(input(password: "before\u{0}after"))
+        }
+        for email in ["me@corp.example\u{202E}", "me@corp.example\u{2800}x", "me@corp.example\u{3164}", "me@corp\u{200B}.example",
+                      "me@corp.example\u{7F}", "me@corp.example\u{85}", "me @corp.example", "me@corp.example\n", "mé@corp.example"] {
+            #expect(throws: SetupError.invalid(field: "email"), Comment(rawValue: email.debugDescription)) {
+                _ = try Setup.makeConfig(input(email: email))
+            }
+        }
         let ok = try Setup.makeConfig(input())
         #expect(ok.organizationID == "org")
     }
@@ -269,6 +330,7 @@ struct SetupInstallTests {
         /// 1-based number of the one call that is refused, when only that one should fail.
         var refuseCall: Int?
         var calls: [String] { lock.lock(); defer { lock.unlock() }; return seen }
+        func checkRunning(pid: Int32, teamID: String) throws {}
         func check(path: String, teamID: String) throws {
             lock.lock(); seen.append(path); let number = seen.count; lock.unlock()
             if !accept || number == refuseCall { throw BwError.signatureMismatch }
@@ -337,9 +399,123 @@ struct SetupInstallTests {
         }
     }
 
+    @Test func aSymbolicLinkAsSourceIsFollowedAndTheCopyIsARegularFile() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            let real = writeFile(dir + "/real/bw", "official")
+            chmod(real, 0o644)
+            try FileManager.default.createDirectory(atPath: dir + "/links", withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(atPath: dir + "/links/bw", withDestinationPath: "../real/bw")   // relative, like Homebrew's
+            let destination = dir + "/home/bin/bw"
+            let pin = try Setup.installBw(from: dir + "/links/bw", teamID: teamID, to: destination, signature: Recorder())
+            #expect(pin == .signedRelease(teamID: teamID, path: destination))
+            var info = stat()
+            #expect(lstat(destination, &info) == 0 && info.st_mode & S_IFMT == S_IFREG, "the installed file is not a link")
+            let installed = try String(contentsOfFile: destination, encoding: .utf8)
+            #expect(installed == "official")
+            #expect(permissionBits(of: real) == 0o644, "the user's own file keeps its mode")
+        }
+    }
+
+    @Test func aDirectoryOrADanglingLinkAsSourceIsMissingNotInstalled() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            try FileManager.default.createDirectory(atPath: dir + "/dir/bw", withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(atPath: dir + "/dangling", withDestinationPath: dir + "/nowhere")
+            for source in [dir + "/dir/bw", dir + "/dangling"] {
+                #expect(throws: SetupError.installFailed(reason: "the bw file to copy is missing")) {
+                    _ = try Setup.installBw(from: source, teamID: teamID, to: dir + "/home/bin/bw", signature: Recorder())
+                }
+            }
+            #expect(!FileManager.default.fileExists(atPath: dir + "/home/bin/bw"))
+        }
+    }
+
     @Test func aMissingSourceIsRefused() {
         #expect(throws: SetupError.installFailed(reason: "the bw file to copy is missing")) {
             _ = try Setup.installBw(from: "/nonexistent/bw", teamID: teamID, to: "/tmp/never/bw", signature: Recorder())
         }
+    }
+}
+
+
+struct SetupProfileTests {
+    private func makeProfile(_ path: String, marker: String) throws {
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        try marker.write(toFile: path + "/data.json", atomically: true, encoding: .utf8)
+    }
+
+    @Test func aStagedProfileTakesTheLiveNameAndTheOldOneIsGone() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            try makeProfile(dir + "/bw", marker: "old")
+            try makeProfile(dir + "/bw.staged-1", marker: "new")
+            try Setup.commitProfile(staged: dir + "/bw.staged-1", live: dir + "/bw", lockPath: dir + "/state/bw.lock", timeouts: .default)
+            let live = try String(contentsOfFile: dir + "/bw/data.json", encoding: .utf8)
+            let siblings = try FileManager.default.contentsOfDirectory(atPath: dir).sorted()
+            #expect(live == "new")
+            #expect(siblings == ["bw", "state"], "no staged or backup directory is left: \(siblings)")
+        }
+    }
+
+    @Test func withoutALiveProfileTheStagedOneSimplyTakesItsPlace() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            try makeProfile(dir + "/bw.staged-1", marker: "new")
+            try Setup.commitProfile(staged: dir + "/bw.staged-1", live: dir + "/bw", lockPath: dir + "/state/bw.lock", timeouts: .default)
+            let live = try String(contentsOfFile: dir + "/bw/data.json", encoding: .utf8)
+            #expect(live == "new")
+        }
+    }
+
+    @Test func aMissingStagedProfileLeavesTheLiveOneUntouched() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            try makeProfile(dir + "/bw", marker: "old")
+            #expect(throws: SetupError.bwFailed(step: "profile")) {
+                try Setup.commitProfile(staged: dir + "/bw.staged-missing", live: dir + "/bw", lockPath: dir + "/state/bw.lock", timeouts: .default)
+            }
+            let live = try String(contentsOfFile: dir + "/bw/data.json", encoding: .utf8)
+            let siblings = try FileManager.default.contentsOfDirectory(atPath: dir).sorted()
+            #expect(live == "old")
+            #expect(siblings == ["bw", "state"], "\(siblings)")
+        }
+    }
+
+    @Test func commitWaitsForTheBwLock() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            try makeProfile(dir + "/bw.staged-1", marker: "new")
+            let held = try BwLock.acquire(path: dir + "/state/bw.lock", timeout: 1)
+            var timeouts = BwTimeouts()
+            timeouts.lockWait = 0.2
+            #expect(throws: SetupError.bwFailed(step: "lock")) {
+                try Setup.commitProfile(staged: dir + "/bw.staged-1", live: dir + "/bw", lockPath: dir + "/state/bw.lock", timeouts: timeouts)
+            }
+            held.release()
+            #expect(FileManager.default.fileExists(atPath: dir + "/bw.staged-1"), "nothing moved while the lock was held")
+        }
+    }
+
+    @Test func discardRemovesAStagedProfileAndIsHarmlessWhenGone() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            try makeProfile(dir + "/bw.staged-1", marker: "x")
+            Setup.discardProfile(staged: dir + "/bw.staged-1")
+            #expect(!FileManager.default.fileExists(atPath: dir + "/bw.staged-1"))
+            Setup.discardProfile(staged: dir + "/bw.staged-1")
+        }
+    }
+}
+
+struct SetupErrorMessageTests {
+    @Test func aLoginFailureHintsAtThePasswordAndTwoStepLoginButNeverAtBwOutput() {
+        let message = SetupError.bwFailed(step: "login").message
+        #expect(message.contains("two-step"))
+        #expect(!SetupError.bwFailed(step: "config server").message.contains("two-step"))
+    }
+
+    @Test func anUnavailableApprovalNamesTheReasonAndSaysNothingChanged() {
+        #expect(SetupError.approvalUnavailable(reason: "no Touch ID").message == "no approval was possible (no Touch ID); nothing was changed")
     }
 }

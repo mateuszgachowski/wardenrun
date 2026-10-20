@@ -11,6 +11,7 @@ private struct FakeStore: SecretStore {
 }
 
 private struct AcceptingChecker: BwSignatureChecker {
+    func checkRunning(pid: Int32, teamID: String) throws {}
     var accept = true
     func check(path: String, teamID: String) throws { if !accept { throw BwError.signatureMismatch } }
 }
@@ -40,6 +41,22 @@ struct DoctorTests {
         #expect(body[2].hasPrefix("FAIL  c  broken second line"))
         #expect(!report.render().unicodeScalars.contains { $0.value == 0x1B }, "control characters are removed from details")
         #expect(body[3] == "info  d  just so you know")
+    }
+
+    @Test func directionOverridesAndOtherFormatCharactersCannotReorderOrHideALine() {
+        // Built from code points, not typed: right-to-left override, isolates, zero-width space,
+        // word joiner, byte-order mark, and the line and paragraph separators.
+        let invisible = [0x202E, 0x2066, 0x2069, 0x200B, 0x2060, 0xFEFF, 0x2028, 0x2029]
+            .compactMap { Unicode.Scalar($0) }.map { String($0) }.joined()
+        let report = DoctorReport(tier: "B" + invisible + "tier", checks: [
+            CheckResult(name: "na" + invisible + "me", status: .fail, detail: "de" + invisible + "tail"),
+        ])
+        let text = report.render()
+        #expect(text == "wardenrun doctor\ntier: Btier\nFAIL  name  detail\n")
+        let wanted = Set(["\n"])
+        #expect(!text.unicodeScalars.contains { scalar in
+            scalar.properties.generalCategory == .format || (scalar.properties.generalCategory == .control && !wanted.contains(String(scalar)))
+        })
     }
 
     @Test func exitCodeIsOneOnlyForFail() {

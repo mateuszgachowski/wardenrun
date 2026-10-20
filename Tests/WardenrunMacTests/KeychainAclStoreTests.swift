@@ -89,6 +89,27 @@ private func text(_ buffer: SecretBuffer) -> String { buffer.withUnsafeBytes { S
         #expect(text(try #require(try store.load()).masterPassword) == "second-password")
     }
 
+    @Test func aPlantedItemWithAnOpenAccessListIsReplacedNotReused() throws {
+        let keychain = try TempKeychain()
+        try keychain.plantItemOpenToEveryApplication()
+        #expect(keychain.trustedApplicationCount() == -1, "the premise: the planted item is open to every program")
+        let store = keychain.store()
+        try store.save(try sampleConfig(password: "the-real-password"))
+        #expect(keychain.itemCount() == 1)
+        #expect(keychain.trustedApplicationCount() == 1, "the stored item names exactly one program")
+        #expect(text(try #require(try store.load()).masterPassword) == "the-real-password")
+    }
+
+    @Test func theDefaultKeychainIsTheLoginKeychainNamedByPathNotByTheHomeVariable() {
+        let original = getenv("HOME").map { String(cString: $0) }
+        setenv("HOME", "/nonexistent-home-set-by-an-agent", 1)
+        defer { if let original { setenv("HOME", original, 1) } else { unsetenv("HOME") } }
+        let path = KeychainAclStore.loginKeychainPath()
+        #expect(path.hasSuffix("/Library/Keychains/login.keychain-db"))
+        #expect(!path.contains("nonexistent-home-set-by-an-agent"))
+        #expect(path.hasPrefix("/"))
+    }
+
     @Test func eraseRemovesAndSecondEraseIsHarmless() throws {
         let keychain = try TempKeychain()
         let store = keychain.store()
@@ -174,6 +195,43 @@ private func text(_ buffer: SecretBuffer) -> String { buffer.withUnsafeBytes { S
 }
 
 extension TempKeychain {
+    /// Adds an item of the product's service and account whose access list lets every program in.
+    fileprivate func plantItemOpenToEveryApplication() throws {
+        var keychain: SecKeychain?
+        try #require(SecKeychainOpen(path, &keychain) == errSecSuccess)
+        var access: SecAccess?
+        try #require(SecAccessCreate("planted" as CFString, nil, &access) == errSecSuccess)
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "wardenrun-test",
+            kSecAttrAccount as String: "protected-config", kSecValueData as String: Data("planted".utf8),
+            kSecAttrAccess as String: try #require(access), kSecUseKeychain as String: try #require(keychain),
+        ]
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        try #require(status == errSecSuccess, "SecItemAdd \(status)")
+    }
+
+    /// How many programs the item's decrypt entry names; -1 when it lets every program in.
+    fileprivate func trustedApplicationCount(service: String = "wardenrun-test") -> Int {
+        var keychain: SecKeychain?
+        guard SecKeychainOpen(path, &keychain) == errSecSuccess, let keychain else { return -2 }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+            kSecAttrAccount as String: "protected-config", kSecReturnRef as String: true,
+            kSecMatchSearchList as String: [keychain] as CFArray,
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let out else { return -2 }
+        var access: SecAccess?
+        guard SecKeychainItemCopyAccess(out as! SecKeychainItem, &access) == errSecSuccess, let access,
+              let acls = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt) as? [SecACL],
+              let acl = acls.first else { return -2 }
+        var applications: CFArray?
+        var description: CFString?
+        var selector = SecKeychainPromptSelector()
+        guard SecACLCopyContents(acl, &applications, &description, &selector) == errSecSuccess else { return -2 }
+        return (applications as? [SecTrustedApplication])?.count ?? -1
+    }
+
     /// Replaces the stored bytes in place (same service and account), for the corruption tests.
     fileprivate func overwrite(with data: Data) throws {
         var keychain: SecKeychain?

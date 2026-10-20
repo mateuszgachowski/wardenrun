@@ -39,14 +39,18 @@ do {
     exit(64)
 }
 
+/// `setup`, `run` and `new` start only in a state where the checks pass. A build from source
+/// (no hardened runtime) may run only if it is a debug build: a switch anybody could set from the
+/// environment would not be a protection.
 func refuseUnlessSafe() {
-    let dyld = Hardening.dyldVariables(in: environment)
-    if !dyld.isEmpty {
-        complain("refusing to run with DYLD_ variables set (\(dyld.joined(separator: ", ")))")
-        exit(78)
-    }
-    if let failure = hardening.first(where: { $0.status == .fail }) {
-        complain("refusing to run: \(failure.name): \(failure.detail)")
+    #if DEBUG
+    let allowUnhardened = true
+    #else
+    let allowUnhardened = false
+    #endif
+    let checks = hardening + Hardening.selfCheck(environment: environment)
+    if let reason = StartupPolicy.refusal(checks: checks, allowUnhardened: allowUnhardened) {
+        complain(reason)
         exit(78)
     }
 }

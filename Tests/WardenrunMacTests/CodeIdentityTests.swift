@@ -119,6 +119,28 @@ struct CodeIdentityTests {
         #expect(throws: BwError.signatureMismatch) { try checker.check(path: path, teamID: "ABCDEFGHIJ") }
     }
 
+    /// Starts `executable` held before its first instruction, with the live check of the real checker.
+    private func startChecked(_ executable: String, arguments: [String], teamID: String) throws -> BwChild {
+        let team = teamID
+        let spec = BwLaunchSpec(executable: executable, leadingArguments: [], pinnedDirectories: [],
+                                verifyStarted: { pid in try SecuritySignatureChecker().checkRunning(pid: pid, teamID: team) })
+        return try BwProcess.start(spec: spec, arguments: arguments, environment: ["PATH": "/usr/bin:/bin"])
+    }
+
+    @Test func aRunningProcessSignedByAppleIsRefusedForTheBitwardenTeamAndIsKilled() throws {
+        #expect(throws: BwError.signatureMismatch) {
+            _ = try startChecked("/bin/sleep", arguments: ["30"], teamID: "LTZ2PFU5D6")
+        }
+    }
+
+    @Test(.enabled(if: realBw != nil)) func ifTheRealBwIsPresentTheRunningProcessIsAcceptedForTheBitwardenTeamOnly() throws {
+        let path = try #require(Self.realBw)
+        let child = try startChecked(path, arguments: ["--version"], teamID: "LTZ2PFU5D6")
+        defer { child.terminate(grace: 1) }
+        #expect(child.wait(timeout: 60) == .exited(0))
+        #expect(throws: BwError.signatureMismatch) { _ = try startChecked(path, arguments: ["--version"], teamID: "ABCDEFGHIJ") }
+    }
+
     @Test(.enabled(if: realBw != nil)) func ifTheRealBwIsPresentItsIdentityIsReadAsHardenedAndDeveloperID() throws {
         let path = try #require(Self.realBw)
         let identity = try #require(CodeIdentityReader.ofFile(path))

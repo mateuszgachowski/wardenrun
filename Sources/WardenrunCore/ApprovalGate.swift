@@ -53,10 +53,16 @@ public final class ApprovalGate: @unchecked Sendable {
         let statePath = directory + "/approval-state.json"
         var state = Self.read(statePath)
         let start = now().timeIntervalSince1970
+        // A state file is just a file. A lock-out further away than one lock-out can last is not
+        // one this code wrote: it is ignored (and a file that is deleted lifts the limit anyway).
+        if state.lockedUntil > start + lockout { state.lockedUntil = 0 }
         if state.lockedUntil > start {
             throw GateRefusal.lockedOut(secondsLeft: Int((state.lockedUntil - start).rounded(.up)))
         }
         state.failures = state.failures.filter { start - $0 < window && $0 <= start }
+        // If the limit cannot be remembered, nothing is asked: a state that cannot be written
+        // would otherwise switch the lock-out off.
+        guard Self.write(state, to: statePath) else { throw GateRefusal.stateUnavailable }
 
         let decision = ask()
         switch decision {
@@ -96,16 +102,20 @@ public final class ApprovalGate: @unchecked Sendable {
         return State(failures: failures, lockedUntil: lockedUntil)
     }
 
-    /// Atomic replace, mode 0600. A failure to write only means the limit is not remembered.
-    private static func write(_ state: State, to path: String) {
+    /// Atomic replace, mode 0600; the temporary name is removed first and created exclusively
+    /// without following links. Returns whether the state is now on disk.
+    @discardableResult
+    private static func write(_ state: State, to path: String) -> Bool {
         let object: [String: Any] = ["failures": state.failures, "locked_until": state.lockedUntil]
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return false }
         let temporary = path + ".tmp"
-        let descriptor = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else { return }
+        unlink(temporary)
+        let descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { return false }
         let written = data.withUnsafeBytes { Foundation.write(descriptor, $0.baseAddress, $0.count) }
         close(descriptor)
-        if written == data.count { rename(temporary, path) } else { unlink(temporary) }
+        guard written == data.count, rename(temporary, path) == 0 else { unlink(temporary); return false }
+        return true
     }
 }
 

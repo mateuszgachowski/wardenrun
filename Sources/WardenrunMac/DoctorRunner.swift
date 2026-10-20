@@ -7,7 +7,7 @@ import WardenrunCore
 /// protected item and at the pinned `bw`; it makes no network call and prints no secret, only
 /// counts, booleans and paths that are not secret.
 public enum DoctorRunner {
-    /// The `bw` release wardenrun's tests ran against; anything else is "untested", not "wrong".
+    /// The `bw` release wardenrun was developed against (the real-`bw` tests run on one); anything else is "untested", not "wrong".
     static let testedBwPrefix = "2026.10."
 
     public static func run(environment: [String: String], store: SecretStore, paths: WardenrunPaths,
@@ -81,7 +81,7 @@ public enum DoctorRunner {
             }
             let tested = version.hasPrefix(testedBwPrefix)
             return CheckResult(name: "bw-version", status: .info,
-                               detail: "\(version) (wardenrun is tested with \(testedBwPrefix)x)" + (tested ? "" : "; this one is untested"))
+                               detail: "\(version) (wardenrun is developed against \(testedBwPrefix)x)" + (tested ? "" : "; this one is untested"))
         } catch {
             return CheckResult(name: "bw-version", status: .warn, detail: "bw could not be started to read its version")
         }

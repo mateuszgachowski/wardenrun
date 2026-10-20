@@ -10,6 +10,14 @@ final class RecordingChecker: BwSignatureChecker, @unchecked Sendable {
     init(accept: Bool = true) { self.accept = accept }
 
     var calls: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    private var running: [String] = []
+    /// `team@pid` of every live check.
+    var runningCalls: [String] { lock.lock(); defer { lock.unlock() }; return running }
+
+    func checkRunning(pid: Int32, teamID: String) throws {
+        lock.lock(); running.append("\(teamID)@\(pid)"); lock.unlock()
+        if !accept { throw BwError.signatureMismatch }
+    }
 
     func check(path: String, teamID: String) throws {
         lock.lock(); recorded.append(teamID + "@" + path); lock.unlock()
@@ -19,6 +27,28 @@ final class RecordingChecker: BwSignatureChecker, @unchecked Sendable {
 
 struct BwBinaryTests {
     private let team = "LTZ2PFU5D6"
+
+    @Test func theSpecCarriesALiveCheckThatAsksTheCheckerAboutTheRunningProcess() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            let bw = writeFile(dir + "/bin/bw")
+            let checker = RecordingChecker()
+            let spec = try BwBinaryPolicy.launchSpec(for: .signedRelease(teamID: team, path: bw), signature: checker)
+            let verify = try #require(spec.verifyStarted)
+            try verify(4242)
+            #expect(checker.runningCalls == ["\(team)@4242"])
+            let refuse = RecordingChecker(accept: false)
+            #expect(throws: BwError.signatureMismatch) {
+                _ = try BwBinaryPolicy.launchSpec(for: .signedRelease(teamID: team, path: bw), signature: refuse)
+            }
+        }
+    }
+
+    @Test func theLiveCheckIsNotPartOfTheSpecsEquality() {
+        let a = BwLaunchSpec(executable: "/x", leadingArguments: [], pinnedDirectories: ["/"])
+        let b = BwLaunchSpec(executable: "/x", leadingArguments: [], pinnedDirectories: ["/"], verifyStarted: { _ in })
+        #expect(a == b)
+    }
 
 
     // MARK: signed release
