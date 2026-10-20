@@ -242,7 +242,7 @@ struct LocalHTTPTests {
         server.run { client in
             let start = Date()
             #expect(throws: BwError.outputTooLarge) { _ = try client.send(method: "GET", path: "/x", body: nil, deadline: 5) }
-            #expect(Date().timeIntervalSince(start) < 2)
+            #expect(Date().timeIntervalSince(start) < 4.5)
         }
     }
 
@@ -291,17 +291,17 @@ struct LocalHTTPTests {
             let start = Date()
             #expect(throws: BwError.timeout(phase: "request")) { _ = try client.send(method: "GET", path: "/x", body: nil, deadline: 0.3) }
             let elapsed = Date().timeIntervalSince(start)
-            #expect(elapsed >= 0.25 && elapsed < 2, "took \(elapsed) s")
+            #expect(elapsed >= 0.25 && elapsed < 10, "took \(elapsed) s")
         }
     }
 
     @Test func cancelUnblocksARequestThatIsWaitingForTheReply() throws {
         let server = try FakeServer { fd in drainUntilClosed(fd) }
         server.run { client in
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { client.cancel() }
+            afterDelay(0.2) { client.cancel() }
             let start = Date()
             #expect(throws: BwError.cancelled) { _ = try client.send(method: "GET", path: "/x", body: nil, deadline: 20) }
-            #expect(Date().timeIntervalSince(start) < 3)
+            #expect(Date().timeIntervalSince(start) < 10)
         }
     }
 

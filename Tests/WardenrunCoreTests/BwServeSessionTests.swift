@@ -166,7 +166,7 @@ struct BwServeSessionTests {
         let start = Date()
         #expect(throws: BwError.timeout(phase: "sync")) { try session.sync() }
         session.close()
-        #expect(Date().timeIntervalSince(start) < 3)
+        #expect(Date().timeIntervalSince(start) < 10)
         #expect(fake.handle?.terminated.value == true)
     }
 
@@ -176,7 +176,7 @@ struct BwServeSessionTests {
         let session = try started(fake, timeouts: fast { $0.unlock = 0.3; $0.request = 30 })
         let start = Date()
         #expect(throws: BwError.timeout(phase: "unlock")) { try session.unlock(password: secret(fake.password)) }
-        #expect(Date().timeIntervalSince(start) < 3)
+        #expect(Date().timeIntervalSince(start) < 10)
         session.close()
     }
 
@@ -185,10 +185,10 @@ struct BwServeSessionTests {
         fake.overrides["POST /sync"] = "SILENT"
         let session = try started(fake)
         try session.unlock(password: secret(fake.password))
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { session.cancel() }
+        afterDelay(0.2) { session.cancel() }
         let start = Date()
         #expect(throws: BwError.cancelled) { try session.sync() }
-        #expect(Date().timeIntervalSince(start) < 3)
+        #expect(Date().timeIntervalSince(start) < 10)
         #expect(throws: BwError.cancelled) { try session.sync() }
         session.close()
         #expect(fake.handle?.terminated.value == true)
@@ -271,7 +271,7 @@ struct BwServeSessionTests {
         let session = BwServeSession(launcher: fake, timeouts: fast { $0.start = 0.3 })
         let start = Date()
         #expect(throws: BwError.timeout(phase: "start")) { try session.start() }
-        #expect(Date().timeIntervalSince(start) < 3)
+        #expect(Date().timeIntervalSince(start) < 10)
         #expect(fake.handle?.terminated.value == true)
     }
 

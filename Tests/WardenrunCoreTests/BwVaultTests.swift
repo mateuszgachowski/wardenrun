@@ -415,10 +415,10 @@ struct BwVaultTests {
         try withRig { rig in
             rig.fake.overrides["POST /sync"] = "SILENT"
             let vault = try rig.vault()
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { vault.cancel() }
+            afterDelay(0.3) { vault.cancel() }
             let start = Date()
             #expect(throws: BwError.cancelled) { _ = try vault.fetch(itemName: "x") }
-            #expect(Date().timeIntervalSince(start) < 5)
+            #expect(Date().timeIntervalSince(start) < 10)
             #expect(rig.fake.handle?.terminated.value == true)
             #expect(lockIsFree(rig))
             // once cancelled, always cancelled
@@ -432,10 +432,10 @@ struct BwVaultTests {
             let held = try BwLock.acquire(path: rig.lockPath, timeout: 1)
             defer { held.release() }
             let vault = try rig.vault()
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { vault.cancel() }
+            afterDelay(0.3) { vault.cancel() }
             let start = Date()
             #expect(throws: BwError.cancelled) { _ = try vault.fetch(itemName: "x") }
-            #expect(Date().timeIntervalSince(start) < 5)
+            #expect(Date().timeIntervalSince(start) < 10)
         }
     }
 

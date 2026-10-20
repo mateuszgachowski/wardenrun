@@ -46,3 +46,13 @@ func writeFile(_ path: String, _ contents: String = "#!/bin/sh\necho hi\n", mode
     chmod(path, mode_t(mode))
     return path
 }
+
+/// Runs `block` on its own thread after `seconds`. Tests use this instead of
+/// `DispatchQueue.global().asyncAfter`: parallel tests that block in `poll` can use up the
+/// shared pool on a small CI runner, and the "later" action then never gets to run.
+func afterDelay(_ seconds: TimeInterval, _ block: @escaping @Sendable () -> Void) {
+    Thread.detachNewThread {
+        Thread.sleep(forTimeInterval: seconds)
+        block()
+    }
+}

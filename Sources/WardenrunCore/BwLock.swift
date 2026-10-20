@@ -6,7 +6,7 @@ import Foundation
 ///
 /// The descriptor is close-on-exec: a child must never inherit the lock, or it would outlive the
 /// run that took it.
-public final class BwLock {
+public final class BwLock: @unchecked Sendable {
     private var descriptor: Int32
     private let guardLock = NSLock()
 

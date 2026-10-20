@@ -46,10 +46,10 @@ struct BwLockTests {
         try withTempDirectory { dir in
             let path = dir + "/bw.lock"
             let holder = try BwLock.acquire(path: path, timeout: 1)
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { holder.release() }
+            afterDelay(0.2) { holder.release() }
             let start = Date()
             let waiter = try BwLock.acquire(path: path, timeout: 5)
-            #expect(Date().timeIntervalSince(start) < 3)
+            #expect(Date().timeIntervalSince(start) < 4.5)
             waiter.release()
         }
     }

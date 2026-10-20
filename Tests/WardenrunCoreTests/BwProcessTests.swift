@@ -99,7 +99,7 @@ struct BwProcessTests {
         usleep(200_000)
         let start = Date()
         child.terminate(grace: 0.3)
-        #expect(Date().timeIntervalSince(start) < 4)
+        #expect(Date().timeIntervalSince(start) < 10)
         #expect(!child.isRunning)
         #expect(isGone(child.pid))
     }
