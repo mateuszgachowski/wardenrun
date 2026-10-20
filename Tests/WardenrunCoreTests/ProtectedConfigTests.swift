@@ -7,7 +7,7 @@ struct ProtectedConfigTests {
     private static let hash = String(repeating: "ab", count: 32)
 
     /// A valid blob as a dictionary, so each test can break one thing.
-    private func blob(_ change: (inout [String: Any]) -> Void = { _ in }) throws -> Data {
+    private func blob(_ change: (inout [String: Any]) -> Void = { _ in }) throws -> SecretBuffer {
         var object: [String: Any] = [
             "version": 1,
             "server_url": "https://vault.example:8443/base",
@@ -18,8 +18,12 @@ struct ProtectedConfigTests {
             "bw_pin": ["kind": "signed_release", "team_id": "LTZ2PFU5D6", "path": "/opt/wardenrun/bw"],
         ]
         change(&object)
-        return try JSONSerialization.data(withJSONObject: object)
+        return SecretBuffer(copying: Array(try JSONSerialization.data(withJSONObject: object)))
     }
+
+    private func buffer(_ text: String) -> SecretBuffer { SecretBuffer(copying: Array(text.utf8)) }
+
+    private func data(_ buffer: SecretBuffer) -> Data { buffer.withUnsafeBytes { Data($0) } }
 
     private func passwordText(_ config: ProtectedConfig) -> String {
         config.masterPassword.withUnsafeBytes { String(decoding: $0, as: UTF8.self) }
@@ -64,7 +68,7 @@ struct ProtectedConfigTests {
 
     @Test func encodeWritesTheVersionAndThePasswordBecauseThatIsTheBlobToStore() throws {
         let config = try ProtectedConfig.decode(from: blob())
-        let object = try #require(JSONSerialization.jsonObject(with: config.encode()) as? [String: Any])
+        let object = try #require(JSONSerialization.jsonObject(with: data(config.encode())) as? [String: Any])
         #expect(object["version"] as? Int == ProtectedConfig.currentVersion)
         #expect(object["master_password"] as? String == Self.password)
     }
@@ -210,10 +214,73 @@ struct ProtectedConfigTests {
     }
 
     @Test func rejectsGarbage() {
-        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: Data("not json".utf8)) }
-        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: Data("[1,2]".utf8)) }
+        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: buffer("not json")) }
+        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: buffer("[1,2]")) }
         #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: blob { $0["collection_ids"] = "col-1" }) }
         #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: blob { $0["bw_pin"] = ["kind": "mystery"] }) }
+    }
+
+    // MARK: the codec keeps the password out of Strings and Data
+
+    @Test func theEncodedBlobIsASecretBufferThatParsesToTheSameFields() throws {
+        let config = try ProtectedConfig.decode(from: blob())
+        let encoded = try config.encode()
+        let object = try #require(JSONSerialization.jsonObject(with: data(encoded)) as? [String: Any])
+        #expect(object["server_url"] as? String == "https://vault.example:8443/base")
+        #expect(object["collection_ids"] as? [String] == ["col-1", "col-2"])
+        #expect(object["bw_pin"] as? [String: String] == ["kind": "signed_release", "team_id": "LTZ2PFU5D6", "path": "/opt/wardenrun/bw"])
+        #expect(object["node_extra_ca_certs"] == nil && object["https_proxy"] == nil)
+        encoded.wipe()
+        #expect(encoded.isWiped)
+    }
+
+    @Test func aPasswordWithQuoteBackslashNewlineNulAndEmojiRoundTripsByteForByte() throws {
+        let bs = "\\"
+        let tricky = ["pa\"ss", "back" + bs + "slash", "line\nbreak\ttab", "nul\u{0}byte", "emoji \u{1F600} \u{e9}",
+                      bs + "u" + "0041 stays text", "trailing" + bs]
+        for text in tricky {
+            let url = try #require(URL(string: "https://vault.example"))
+            let original = try ProtectedConfig(serverURL: url, accountEmail: "a@b.example", organizationID: "o",
+                                               collectionIDs: ["c"], masterPassword: buffer(text),
+                                               bwPin: .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"))
+            let copy = try ProtectedConfig.decode(from: original.encode())
+            #expect(copy.masterPassword.withUnsafeBytes { Array($0) } == Array(text.utf8), "\(text.debugDescription)")
+        }
+    }
+
+    @Test func unknownKeysAreIgnoredAndATrailingGarbageByteIsMalformed() throws {
+        _ = try ProtectedConfig.decode(from: blob { $0["future_field"] = ["a": [1, 2, 3]] })
+        let good = try data(blob())
+        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: SecretBuffer(copying: Array(good) + [0x7B])) }
+        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: SecretBuffer(copying: [])) }
+    }
+
+    @Test func aDuplicatedKnownKeyIsMalformed() throws {
+        let text = "{\"version\":1,\"version\":1,\"server_url\":\"https://vault.example\",\"account_email\":\"a@b.example\","
+            + "\"organization_id\":\"o\",\"collection_ids\":[\"c\"],\"master_password\":\"pw-123456\","
+            + "\"bw_pin\":{\"kind\":\"signed_release\",\"team_id\":\"LTZ2PFU5D6\",\"path\":\"/x\"}}"
+        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: buffer(text)) }
+    }
+
+    @Test func aDuplicatedKeyInsideThePinIsMalformed() throws {
+        let text = "{\"version\":1,\"server_url\":\"https://vault.example\",\"account_email\":\"a@b.example\","
+            + "\"organization_id\":\"o\",\"collection_ids\":[\"c\"],\"master_password\":\"pw-123456\","
+            + "\"bw_pin\":{\"kind\":\"signed_release\",\"team_id\":\"LTZ2PFU5D6\",\"path\":\"/x\",\"path\":\"/y\"}}"
+        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: buffer(text)) }
+    }
+
+    @Test func wrongValueTypesAreMalformedNotMissing() throws {
+        for change in [{ (o: inout [String: Any]) in o["version"] = "1" }, { $0["server_url"] = 5 },
+                       { $0["master_password"] = 12345 }, { $0["collection_ids"] = [1, 2] },
+                       { $0["account_email"] = ["x"] }] as [(inout [String: Any]) -> Void] {
+            #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: blob(change)) }
+        }
+    }
+
+    @Test func aWipedBufferIsMalformed() throws {
+        let wiped = try blob()
+        wiped.wipe()
+        #expect(throws: ConfigError.malformed) { try ProtectedConfig.decode(from: wiped) }
     }
 
     // MARK: the password never leaks through printing or errors
@@ -229,7 +296,7 @@ struct ProtectedConfigTests {
     }
 
     @Test func noErrorEchoesThePasswordOrTheServerCredentials() throws {
-        let failures: [Data] = [
+        let failures: [SecretBuffer] = [
             try blob { $0["organization_id"] = nil },
             try blob { $0["server_url"] = "https://user:hunter2@vault.example" },
             try blob { $0["collection_ids"] = [String]() },

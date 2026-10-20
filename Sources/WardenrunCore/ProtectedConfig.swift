@@ -1,54 +1,12 @@
 import Foundation
 
 /// How wardenrun recognises the `bw` it is allowed to run (DESIGN 5.2, rule 1).
-public enum BwPin: Codable, Equatable, Sendable {
+public enum BwPin: Equatable, Sendable {
     /// The signed GitHub-release binary at this absolute path, checked against a code
     /// requirement on this team before every run.
     case signedRelease(teamID: String, path: String)
     /// Homebrew's Node build: absolute paths of `node` and the script, with their SHA-256.
     case nodeScript(nodePath: String, nodeSHA256: String, scriptPath: String, scriptSHA256: String)
-
-    private enum Keys: String, CodingKey {
-        case kind
-        case teamID = "team_id"
-        case path
-        case nodePath = "node_path"
-        case nodeSHA256 = "node_sha256"
-        case scriptPath = "script_path"
-        case scriptSHA256 = "script_sha256"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: Keys.self)
-        switch try c.decode(String.self, forKey: .kind) {
-        case "signed_release":
-            self = .signedRelease(teamID: try c.decode(String.self, forKey: .teamID),
-                                  path: try c.decode(String.self, forKey: .path))
-        case "node_script":
-            self = .nodeScript(nodePath: try c.decode(String.self, forKey: .nodePath),
-                               nodeSHA256: try c.decode(String.self, forKey: .nodeSHA256),
-                               scriptPath: try c.decode(String.self, forKey: .scriptPath),
-                               scriptSHA256: try c.decode(String.self, forKey: .scriptSHA256))
-        default:
-            throw DecodingError.dataCorruptedError(forKey: .kind, in: c, debugDescription: "unknown pin kind")
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: Keys.self)
-        switch self {
-        case .signedRelease(let teamID, let path):
-            try c.encode("signed_release", forKey: .kind)
-            try c.encode(teamID, forKey: .teamID)
-            try c.encode(path, forKey: .path)
-        case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
-            try c.encode("node_script", forKey: .kind)
-            try c.encode(nodePath, forKey: .nodePath)
-            try c.encode(nodeSHA256, forKey: .nodeSHA256)
-            try c.encode(scriptPath, forKey: .scriptPath)
-            try c.encode(scriptSHA256, forKey: .scriptSHA256)
-        }
-    }
 }
 
 public enum ConfigError: Error, Equatable {
@@ -120,32 +78,54 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
         self.httpsProxy = httpsProxy
     }
 
-    /// The JSON that is stored in the keychain item. It contains the master password.
-    public func encode() throws -> Data {
-        let wire = Wire(version: Self.currentVersion, serverURL: serverURL.absoluteString,
-                        accountEmail: accountEmail, organizationID: organizationID,
-                        collectionIDs: collectionIDs,
-                        masterPassword: masterPassword.withUnsafeBytes { String(decoding: $0, as: UTF8.self) },
-                        bwPin: bwPin, nodeExtraCACerts: nodeExtraCACerts, httpsProxy: httpsProxy)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(wire)
+    /// The JSON that is stored in the keychain item. It contains the master password, so it is
+    /// written straight into locked memory and never passes through a `String` or `Data`.
+    public func encode() throws -> SecretBuffer {
+        let pin: SecretJSONValue
+        switch bwPin {
+        case .signedRelease(let teamID, let path):
+            pin = .object([("kind", .string("signed_release")), ("team_id", .string(teamID)), ("path", .string(path))])
+        case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
+            pin = .object([("kind", .string("node_script")), ("node_path", .string(nodePath)),
+                           ("node_sha256", .string(nodeSHA256)), ("script_path", .string(scriptPath)),
+                           ("script_sha256", .string(scriptSHA256))])
+        }
+        var members: [(String, SecretJSONValue)] = [
+            ("version", .integer(Self.currentVersion)),
+            ("server_url", .string(serverURL.absoluteString)),
+            ("account_email", .string(accountEmail)),
+            ("organization_id", .string(organizationID)),
+            ("collection_ids", .array(collectionIDs.map { .string($0) })),
+            ("master_password", .secret(masterPassword)),
+            ("bw_pin", pin),
+        ]
+        if let nodeExtraCACerts { members.append(("node_extra_ca_certs", .string(nodeExtraCACerts))) }
+        if let httpsProxy { members.append(("https_proxy", .string(httpsProxy))) }
+        return try SecretJSON.encode(.object(members))
     }
 
-    public static func decode(from data: Data) throws -> ProtectedConfig {
-        guard let wire = try? JSONDecoder().decode(Wire.self, from: data) else { throw ConfigError.malformed }
-        guard let version = wire.version else { throw ConfigError.missingField("version") }
+    /// Reads the blob with the byte scanner: the master password goes from the buffer into a new
+    /// `SecretBuffer` without becoming a `String`. Unknown keys are ignored; a known key that
+    /// appears twice, a value of the wrong type or any syntax error is `.malformed`.
+    public static func decode(from blob: SecretBuffer) throws -> ProtectedConfig {
+        let raw: RawConfig
+        do {
+            raw = try blob.withUnsafeBytes { try RawConfig.read($0) }
+        } catch is JSONError {
+            throw ConfigError.malformed
+        }
+        guard let version = raw.version else { throw ConfigError.missingField("version") }
         guard version == currentVersion else { throw ConfigError.unsupportedVersion(version) }
-        guard let serverText = wire.serverURL else { throw ConfigError.missingField("server_url") }
-        guard let email = wire.accountEmail else { throw ConfigError.missingField("account_email") }
-        guard let organization = wire.organizationID else { throw ConfigError.missingField("organization_id") }
-        guard let collections = wire.collectionIDs else { throw ConfigError.missingField("collection_ids") }
-        guard let password = wire.masterPassword else { throw ConfigError.missingField("master_password") }
-        guard let pin = wire.bwPin else { throw ConfigError.missingField("bw_pin") }
+        guard let serverText = raw.serverURL else { throw ConfigError.missingField("server_url") }
+        guard let email = raw.accountEmail else { throw ConfigError.missingField("account_email") }
+        guard let organization = raw.organizationID else { throw ConfigError.missingField("organization_id") }
+        guard let collections = raw.collectionIDs else { throw ConfigError.missingField("collection_ids") }
+        guard let password = raw.masterPassword else { throw ConfigError.missingField("master_password") }
+        guard let pin = raw.bwPin else { throw ConfigError.missingField("bw_pin") }
         let url = try validatedServerURL(serverText)
         return try ProtectedConfig(serverURL: url, accountEmail: email, organizationID: organization,
-                                   collectionIDs: collections, masterPassword: SecretBuffer(copying: Array(password.utf8)),
-                                   bwPin: pin, nodeExtraCACerts: wire.nodeExtraCACerts, httpsProxy: wire.httpsProxy)
+                                   collectionIDs: collections, masterPassword: password, bwPin: pin,
+                                   nodeExtraCACerts: raw.nodeExtraCACerts, httpsProxy: raw.httpsProxy)
     }
 
     public var description: String {
@@ -235,27 +215,94 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
         text.utf8.count == 64 && Hex.decode(text) != nil
     }
 
-    private struct Wire: Codable {
+    /// What the blob says, field by field, before any validation.
+    private struct RawConfig {
         var version: Int?
         var serverURL: String?
         var accountEmail: String?
         var organizationID: String?
         var collectionIDs: [String]?
-        var masterPassword: String?
+        var masterPassword: SecretBuffer?
         var bwPin: BwPin?
         var nodeExtraCACerts: String?
         var httpsProxy: String?
 
-        enum CodingKeys: String, CodingKey {
-            case version
-            case serverURL = "server_url"
-            case accountEmail = "account_email"
-            case organizationID = "organization_id"
-            case collectionIDs = "collection_ids"
-            case masterPassword = "master_password"
-            case bwPin = "bw_pin"
-            case nodeExtraCACerts = "node_extra_ca_certs"
-            case httpsProxy = "https_proxy"
+        static func read(_ bytes: UnsafeRawBufferPointer) throws -> RawConfig {
+            var cursor = JSONCursor(bytes)
+            var raw = RawConfig()
+            var seen = Set<String>()
+            guard try cursor.kind() == .object else { throw ConfigError.malformed }
+            try cursor.members { key, value in
+                let name = String(decoding: key, as: UTF8.self)
+                switch name {
+                case "version", "server_url", "account_email", "organization_id", "collection_ids",
+                     "master_password", "bw_pin", "node_extra_ca_certs", "https_proxy":
+                    guard seen.insert(name).inserted else { throw ConfigError.malformed }
+                default:
+                    try value.skipValue()
+                    return
+                }
+                switch name {
+                case "version": raw.version = try readInteger(&value, in: bytes)
+                case "server_url": raw.serverURL = try readText(&value)
+                case "account_email": raw.accountEmail = try readText(&value)
+                case "organization_id": raw.organizationID = try readText(&value)
+                case "collection_ids": raw.collectionIDs = try readTexts(&value)
+                case "master_password":
+                    guard try value.kind() == .string else { throw ConfigError.malformed }
+                    raw.masterPassword = try value.secretString()
+                case "bw_pin": raw.bwPin = try readPin(&value)
+                case "node_extra_ca_certs": raw.nodeExtraCACerts = try readText(&value)
+                default: raw.httpsProxy = try readText(&value)
+                }
+            }
+            try cursor.finish()
+            return raw
+        }
+
+        private static func readText(_ value: inout JSONCursor) throws -> String {
+            guard try value.kind() == .string else { throw ConfigError.malformed }
+            return String(decoding: try value.string(), as: UTF8.self)
+        }
+
+        private static func readTexts(_ value: inout JSONCursor) throws -> [String] {
+            guard try value.kind() == .array else { throw ConfigError.malformed }
+            var items: [String] = []
+            try value.elements { _, element in items.append(try readText(&element)) }
+            return items
+        }
+
+        private static func readInteger(_ value: inout JSONCursor, in bytes: UnsafeRawBufferPointer) throws -> Int {
+            guard try value.kind() == .number else { throw ConfigError.malformed }
+            let range = try value.skipValue()
+            guard let number = Int(String(decoding: bytes[range], as: UTF8.self)) else { throw ConfigError.malformed }
+            return number
+        }
+
+        private static func readPin(_ value: inout JSONCursor) throws -> BwPin {
+            guard try value.kind() == .object else { throw ConfigError.malformed }
+            var fields: [String: String] = [:]
+            try value.members { key, member in
+                let name = String(decoding: key, as: UTF8.self)
+                if try member.kind() == .string {
+                    guard fields.updateValue(try readText(&member), forKey: name) == nil else { throw ConfigError.malformed }
+                } else {
+                    try member.skipValue()
+                }
+            }
+            switch fields["kind"] {
+            case "signed_release":
+                guard let team = fields["team_id"], let path = fields["path"] else { throw ConfigError.malformed }
+                return .signedRelease(teamID: team, path: path)
+            case "node_script":
+                guard let nodePath = fields["node_path"], let nodeHash = fields["node_sha256"],
+                      let scriptPath = fields["script_path"], let scriptHash = fields["script_sha256"] else {
+                    throw ConfigError.malformed
+                }
+                return .nodeScript(nodePath: nodePath, nodeSHA256: nodeHash, scriptPath: scriptPath, scriptSHA256: scriptHash)
+            default:
+                throw ConfigError.malformed
+            }
         }
     }
 }
