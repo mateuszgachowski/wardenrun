@@ -178,6 +178,57 @@ struct ApprovalGateTests {
         }
     }
 
+    @Test func anAbsurdLockedUntilInTheStateFileIsIgnoredAndDoesNotCrash() throws {
+        try withRig { rig in
+            let gate = rig.gate
+            try fail(gate)                                    // creates the state directory
+            let state = rig.dir + "/state/approval-state.json"
+            for absurd in ["1e300", "9.3e18", "-1e300"] {
+                try Data(#"{"failures":[],"locked_until":\#(absurd)}"#.utf8).write(to: URL(fileURLWithPath: state))
+                let result = try gate.guarded { .approved }
+                #expect(result == .approved, "\(absurd) is not a lock-out this code could have written")
+            }
+        }
+    }
+
+    @Test func aGenuineLockoutLongerThanOneLockoutCannotBeForgedButOneWithinItHolds() throws {
+        try withRig { rig in
+            let gate = rig.gate
+            for _ in 0..<3 { try fail(gate) }
+            #expect(throws: GateRefusal.self) { _ = try gate.guarded { .approved } }
+            rig.advance(61)
+            let result = try gate.guarded { .approved }
+            #expect(result == .approved)
+        }
+    }
+
+    @Test func aStateFileThatCannotBeWrittenMakesTheGateRefuseBeforeAskingNotLiftTheLimit() throws {
+        try withRig { rig in
+            let gate = rig.gate
+            try fail(gate)
+            let state = rig.dir + "/state/approval-state.json"
+            try FileManager.default.removeItem(atPath: state)
+            try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true)   // rename onto it fails
+            var asked = false
+            #expect(throws: GateRefusal.stateUnavailable) { _ = try gate.guarded { asked = true; return .approved } }
+            #expect(!asked, "nothing is asked when the limit cannot be remembered")
+        }
+    }
+
+    @Test func aSymbolicLinkAtTheTemporaryNameIsNotFollowed() throws {
+        try withRig { rig in
+            let gate = rig.gate
+            try fail(gate)
+            let victim = rig.dir + "/victim"
+            try "keep".write(toFile: victim, atomically: true, encoding: .utf8)
+            let temporary = rig.dir + "/state/approval-state.json.tmp"
+            try FileManager.default.createSymbolicLink(atPath: temporary, withDestinationPath: victim)
+            try fail(gate)
+            let kept = try String(contentsOfFile: victim, encoding: .utf8)
+            #expect(kept == "keep", "the planted link must not receive the state")
+        }
+    }
+
     @Test func aStateDirectoryThatCannotBeCreatedMakesTheGateRefuseNotApprove() throws {
         try withRig { rig in
             let blocker = rig.dir + "/blocker"
