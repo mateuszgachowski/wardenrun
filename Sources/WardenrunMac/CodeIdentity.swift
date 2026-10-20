@@ -88,6 +88,23 @@ public struct SecuritySignatureChecker: BwSignatureChecker {
             + " and certificate leaf[subject.OU] = \"\(teamID)\""
     }
 
+    /// The process `pid` is code that satisfies the same requirement. `pid` must be our own
+    /// unreaped child, so that the number cannot have been reused.
+    public func checkRunning(pid: Int32, teamID: String) throws {
+        guard let text = Self.requirementText(teamID: teamID) else { throw BwError.signatureMismatch }
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(text as CFString, SecCSFlags(), &requirement) == errSecSuccess,
+              let requirement else { throw BwError.signatureMismatch }
+        var guest: SecCode?
+        let attributes = [kSecGuestAttributePid: Int(pid)] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &guest) == errSecSuccess, let guest else {
+            throw BwError.signatureMismatch
+        }
+        guard SecCodeCheckValidityWithErrors(guest, SecCSFlags(rawValue: kSecCSStrictValidate), requirement, nil) == errSecSuccess else {
+            throw BwError.signatureMismatch
+        }
+    }
+
     public func check(path: String, teamID: String) throws {
         guard let text = Self.requirementText(teamID: teamID),
               let staticCode = CodeIdentityReader.staticCode(atPath: path) else { throw BwError.signatureMismatch }

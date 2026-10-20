@@ -11,6 +11,7 @@ private struct FakeStore: SecretStore {
 }
 
 private struct AcceptingChecker: BwSignatureChecker {
+    func checkRunning(pid: Int32, teamID: String) throws {}
     var accept = true
     func check(path: String, teamID: String) throws { if !accept { throw BwError.signatureMismatch } }
 }

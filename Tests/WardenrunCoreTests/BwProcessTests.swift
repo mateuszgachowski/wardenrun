@@ -37,6 +37,46 @@ struct BwProcessTests {
         return kill(pid, 0) != 0 || isZombie(pid)
     }
 
+    // MARK: live check
+
+    @Test func theProcessIsCheckedBeforeItRunsItsFirstInstruction() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            let marker = dir + "/ran"
+            let seen = Box<(pid: Int32, ranAlready: Bool)?>(nil)
+            let spec = BwLaunchSpec(executable: "/bin/bash", leadingArguments: ["-c"], pinnedDirectories: [],
+                                    verifyStarted: { pid in
+                                        usleep(400_000)       // a running child would be done by now
+                                        seen.value = (pid, FileManager.default.fileExists(atPath: marker))
+                                    })
+            let result = try BwProcess.run(spec: spec, arguments: ["touch '\(marker)'"], environment: plainEnvironment, deadline: 10)
+            #expect(result.status == .exited(0))
+            let checked = try #require(seen.value)
+            #if canImport(Darwin)
+            #expect(!checked.ranAlready, "on macOS the child is held until the check is done")
+            #endif
+            #expect(checked.pid > 1)
+            #expect(FileManager.default.fileExists(atPath: marker), "and it runs once the check passed")
+        }
+    }
+
+    @Test func aProcessThatFailsTheCheckIsKilledReapedAndNeverRuns() throws {
+        try withTempDirectory { raw in
+            let dir = realPath(raw)
+            let marker = dir + "/ran"
+            let pidSeen = Box<Int32>(0)
+            let spec = BwLaunchSpec(executable: "/bin/bash", leadingArguments: ["-c"], pinnedDirectories: [],
+                                    verifyStarted: { pid in pidSeen.value = pid; throw BwError.signatureMismatch })
+            #expect(throws: BwError.signatureMismatch) {
+                _ = try BwProcess.run(spec: spec, arguments: ["sleep 1; touch '\(marker)'"], environment: plainEnvironment, deadline: 10)
+            }
+            #expect(pidSeen.value > 1)
+            #expect(kill(pidSeen.value, 0) != 0, "the refused child was killed and reaped, not left as a zombie of ours")
+            usleep(1_300_000)
+            #expect(!FileManager.default.fileExists(atPath: marker))
+        }
+    }
+
     // MARK: arguments and environment
 
     @Test func childSeesExactlyTheGivenEnvironmentAndNothingFromTheParent() throws {

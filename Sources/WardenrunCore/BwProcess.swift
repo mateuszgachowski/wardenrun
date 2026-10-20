@@ -209,6 +209,8 @@ public enum BwProcess {
         var flags = Int32(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)
         #if canImport(Darwin)
         flags |= Int32(POSIX_SPAWN_CLOEXEC_DEFAULT)
+        // Held before its first instruction until `verifyStarted` has looked at it.
+        if spec.verifyStarted != nil { flags |= Int32(POSIX_SPAWN_START_SUSPENDED) }
         #endif
         posix_spawnattr_setflags(&attributes, Int16(flags))
 
@@ -221,6 +223,17 @@ public enum BwProcess {
             }
         }
         guard result == 0 else { throw BwError.spawnFailed(errno: result) }
+
+        if let verifyStarted = spec.verifyStarted {
+            do { try verifyStarted(pid) } catch {
+                killpg(pid, SIGKILL)
+                kill(pid, SIGKILL)
+                var status: Int32 = 0
+                while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+                throw error
+            }
+            kill(pid, SIGCONT)
+        }
 
         // The child owns its copies of the write ends; the reader threads own the read ends.
         opened.removeAll { $0 == stdoutRead || $0 == stderrRead }

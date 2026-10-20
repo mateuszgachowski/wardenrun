@@ -149,6 +149,7 @@ struct SetupBwTests {
 
     private struct Accept: BwSignatureChecker {
         func check(path: String, teamID: String) throws {}
+        func checkRunning(pid: Int32, teamID: String) throws {}
     }
 
     private func withRig(_ body: (Rig) throws -> Void) throws {
@@ -211,7 +212,10 @@ struct SetupBwTests {
     }
 
     @Test func aSignatureThatDoesNotMatchStopsBeforeBwRuns() throws {
-        struct Refuse: BwSignatureChecker { func check(path: String, teamID: String) throws { throw BwError.signatureMismatch } }
+        struct Refuse: BwSignatureChecker {
+            func check(path: String, teamID: String) throws { throw BwError.signatureMismatch }
+            func checkRunning(pid: Int32, teamID: String) throws { throw BwError.signatureMismatch }
+        }
         try withRig { rig in
             #expect(throws: SetupError.bwFailed(step: "pin")) {
                 try Setup.configureBw(config: try config(rig), appDataDir: rig.appData, home: rig.dir + "/home",
@@ -326,6 +330,7 @@ struct SetupInstallTests {
         /// 1-based number of the one call that is refused, when only that one should fail.
         var refuseCall: Int?
         var calls: [String] { lock.lock(); defer { lock.unlock() }; return seen }
+        func checkRunning(pid: Int32, teamID: String) throws {}
         func check(path: String, teamID: String) throws {
             lock.lock(); seen.append(path); let number = seen.count; lock.unlock()
             if !accept || number == refuseCall { throw BwError.signatureMismatch }
