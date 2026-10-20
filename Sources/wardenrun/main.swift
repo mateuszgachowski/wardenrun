@@ -57,8 +57,10 @@ case .help:
 case .version:
     say("wardenrun \(WardenrunVersion.current)")
 case .doctor:
+    // The start-up results (debugger attach denied, core dumps off) are part of the report.
     let report = DoctorRunner.run(environment: environment, store: KeychainAclStore(),
-                                  paths: WardenrunPaths(home: homeDirectory()))
+                                  paths: WardenrunPaths(home: homeDirectory()),
+                                  hardening: { hardening + Hardening.selfCheck(environment: $0) })
     FileHandle.standardOutput.write(Data(report.render().utf8))
     exit(report.exitCode)
 case .setup(let options):

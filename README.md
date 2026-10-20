@@ -19,9 +19,13 @@ daemon, no telemetry.
 ## Status
 
 wardenrun is **pre-release**. The design is written and approved
-([`docs/DESIGN.md`](docs/DESIGN.md)); the code is not. Nothing here can be installed or run yet.
-Every section below describes how wardenrun is **designed** to behave, and each claim is
-checked against that design before it is written down.
+([`docs/DESIGN.md`](docs/DESIGN.md)). In code so far: the engine that talks to `bw` (tested
+against a fake `bw serve`; the test against a real Vaultwarden is still to come), the macOS
+layer (keychain item, Touch ID approval, hardening), and two commands, `wardenrun doctor` and
+`wardenrun setup`. **`wardenrun run` and `wardenrun new`, the commands that matter, are not built
+yet**, and there is no release, so there is nothing to install. The sections below describe how
+wardenrun is **designed** to behave; each claim is checked against that design before it is
+written down, and "tested" always says what was tested.
 
 > Not available yet. This is the install command that will work once the first release exists:
 >
@@ -141,6 +145,35 @@ and 5 above apply to it as well.
       the password is never printed, logged or returned
 ```
 
+And `wardenrun setup`, once, with a human at the keyboard. The master password is typed into
+wardenrun and goes nowhere except the places on this page:
+
+```text
+  you, at the terminal:  server, e-mail, organization id, collection ids
+                         master password (typed hidden, never echoed)
+      │
+      ▼
+  (a) wardenrun holds the password in locked memory; nothing is written yet
+  (b) Touch ID sheet: the new settings beside the old ones, NEVER the password
+      ──▶ you approve with a touch  (no touch, no change)
+  (c) the official bw is copied to ~/.config/wardenrun/bin/bw (folder 0700);
+      the copy's signature is checked against Bitwarden's before it is used
+  (d) password ──▶ `bw login` through an inherited pipe (/dev/fd/3): not in an
+      argument, not in an environment variable, not in a file
+      bw ◀──HTTPS──▶ Vaultwarden, leaves login tokens in wardenrun's bw folder
+  (e) proof: bw serve unlocks with the password and locks again, nothing read
+  (f) only now: settings + password ──▶ the one keychain item
+      (a failure at (c), (d) or (e) leaves the keychain item as it was)
+  (g) one audit-log line: "setup", no values
+```
+
+| Step | What travels | Can another process of your user see it? |
+|------|--------------|-------------------------------------------|
+| typing | The password, keystroke by keystroke, into a locked buffer: no `String`, no echo | No (the terminal itself is outside wardenrun's control) |
+| (b) | Old and new settings in the sheet text | No, it is drawn by macOS. Only a yes or a no comes back. |
+| (d) | The password and a newline, through a pipe that only `bw login` inherits | No, with the same caveat as step 4 of `run`: pipe buffers in the kernel are outside what wardenrun can zero |
+| (f) | Settings and password into the keychain item | Not by programs with a different signature |
+
 ### Words used above
 
 - **`argv`**: the command line of a program. Other processes of your user can read it.
@@ -162,14 +195,60 @@ Before the first `run`, a human does this once:
 
 1. In your Vaultwarden clients, create the dedicated account, put it in one organization, and
    give it one collection holding the secrets the agent may use.
-2. Run `wardenrun setup` in a terminal. It asks for the server address and for the dedicated
-   account's master password, which **you type or paste at the terminal**. Changing the settings
-   later needs the password typed again, plus a Touch ID approval that shows the old and the
-   new values.
-3. wardenrun runs `bw login` against your server (over HTTPS), which leaves only login tokens on
-   disk, and stores the master password and settings in the one keychain item described below.
+2. Install the **official `bw` release** (the signed binary from Bitwarden's GitHub releases;
+   not the Homebrew or npm build, which is a Node script that loads code from folders wardenrun
+   cannot vouch for). Note its path.
+3. Find the ids `setup` asks for: the organization id and the collection id(s). They are
+   printed by `bw list organizations` and `bw list collections` for the dedicated account. Do
+   that in a throwaway profile, never in your personal one:
+
+   ```sh
+   export BITWARDENCLI_APPDATA_DIR="$(mktemp -d)"   # a throwaway bw profile
+   bw config server https://vault.example
+   bw login dedicated@example.test                  # asks for the password
+   export BW_SESSION="$(bw unlock --raw)"
+   bw list organizations                            # "id" is the organization id
+   bw list collections                              # "id" of the collection(s), with "organizationId"
+   bw logout; unset BW_SESSION; rm -rf "$BITWARDENCLI_APPDATA_DIR"
+   ```
+
+   These are documented `bw` commands; running them against a real Vaultwarden is part of the
+   integration tests that are still to come.
+4. Run `wardenrun setup` (add `--bw /path/to/bw` if `bw` is not on your `PATH`) in a terminal.
+   It asks for the server address, the account e-mail, the organization id and the collection
+   id(s), then for the master password, which **you type at the terminal, hidden**. It never
+   takes a password as an argument, from a pipe or from a file.
+5. A Touch ID sheet shows the new settings (server, account, organization, collections, the
+   `bw` program) next to the old ones, and never the password. Nothing has changed up to this
+   point. If you refuse, nothing changes at all.
+6. After your touch, `setup` copies `bw` into wardenrun's own folder
+   (`~/.config/wardenrun/bin/bw`, a folder only you can enter) **after checking the copy's
+   signature against Bitwarden's**; logs that copy in to your server with the password
+   (over an inherited pipe: not in an argument, not in an environment variable, not in a file);
+   unlocks and locks once to prove that the password and the account belong together; and
+   **only then** writes the keychain item. If any step fails, the keychain item is untouched
+   (the `bw` profile may be logged out; run `setup` again).
 
 From then on the master password travels only as in steps 3 and 4 above.
+
+Changing the settings later is the same command: it shows the old values as the defaults and in
+the approval sheet, and still needs the password typed again.
+
+### Checking the installation
+
+`wardenrun doctor` is read-only and prints one line per check, never a secret. Its exit code is 1
+if any line says `FAIL`, 0 otherwise (a `warn` does not fail it). The checks:
+
+| Line | What it tells you |
+|------|-------------------|
+| `tier` | The protection level in one sentence: the keychain item opens only for wardenrun's signature; the Touch ID gate is wardenrun's own code, not macOS's |
+| `deny-attach`, `core-dumps`, `dyld-environment` | Debugger attach is denied, core dumps are off, no `DYLD_*` variable is set |
+| `hardened-runtime` | The binary is signed with the hardened runtime (`warn` for an unsigned build, `FAIL` for a signed one without it) |
+| `graphic-session` | There is a screen session to show the Touch ID sheet on (no sheet over ssh or cron) |
+| `certificate` | Who signed this binary (compare with the hash published at release) |
+| `touch-id` | Touch ID can be used right now (`ok`), or the reason it cannot (`FAIL`) |
+| `protected-item` | The keychain item is readable by this binary (`ok`, with the number of collections), does not exist yet (`info`) or cannot be read (`FAIL`: another signer, or damaged) |
+| `bw-pin`, `bw-version`, `bw-profile` | The pinned `bw` still carries Bitwarden's signature (`FAIL` if not); its version, marked `untested` unless it is the one wardenrun was tested with (2026.10.x); whether wardenrun's own `bw` profile exists yet. Reading the version starts `bw` once: no vault, no network. |
 
 ## What wardenrun can reach, and what it cannot
 
@@ -198,12 +277,14 @@ dedicated account and the advice below.
 
 | Where | What is in it | How long |
 |-------|---------------|----------|
-| **One macOS login-keychain item** | The master password of the dedicated account, the server address, the account name, the organization and allowed collection, and the identity of the `bw` program wardenrun trusts. Only programs signed with wardenrun's certificate can read it. | Until you remove it or run `wardenrun setup` again |
+| **One macOS login-keychain item** | The master password of the dedicated account, the server address, the account name, the organization and allowed collection, and the identity of the `bw` program wardenrun trusts. Only programs signed with wardenrun's certificate can read it. It is written last by `setup`, after the login worked. | Until you remove it or run `wardenrun setup` again |
+| **`~/.config/wardenrun/bin/bw`** | A copy of the official `bw` release, made by `setup` after its signature was checked (and checked again at that path). The folder is mode `0700`. It is code, not a secret. | Until you delete it or run `setup` again |
+| **`~/.config/wardenrun/state/`**, **`bw.lock`** | Files for the approval limit (one sheet at a time; a short lock-out after repeated refusals: times of recent refusals, no names) and the lock that keeps two wardenruns from using `bw` at once. | Until you delete them. Deleting them also lifts the lock-out: this limit slows a pestering agent, it is not a barrier against one that can delete files. |
 | **`~/.config/wardenrun/bw/`** | wardenrun's *own* `bw` profile: login tokens (**plain text**, mode `0600`; plus the API-key secret if you logged in with one) and, as far as is known, an encrypted copy of the vault and the wrapped vault key. Never your personal `bw` profile. | Until you delete it. An option logs out after every run. |
-| **`~/.config/wardenrun/config.toml`** | Preferences only: approval timeout, the redaction text, the log path. Nothing in it can widen access. | Until you delete it |
+| **`~/.config/wardenrun/config.toml`** | Not built yet; nothing reads it. It is reserved for preferences only (approval timeout, redaction text, log path); nothing in it will be able to widen access. | |
 | **`~/Library/Logs/wardenrun/audit.jsonl`** | One line per event: time, event (approved, denied, timeout, error, new, setup), item *name*, command line (any secret masked), program path and hash, working directory, parent processes, protection level, exit status, duration. Lines are hash-chained, which catches accidents and clumsy edits, not a determined rewrite by a process of yours. **Never values.** | Until you delete it |
 | **A temporary file** | Only with `--file`: a `0600` file in a fresh `0700` directory containing the secret | Removed when the command exits, and on signals |
-| **wardenrun's memory** | The master password and the secret, in locked memory, zeroed after use, with core dumps disabled | Seconds |
+| **wardenrun's memory** | The master password and the secret, in locked memory, zeroed after use, with core dumps disabled. Copies outside wardenrun's own buffers are not covered: the kernel's pipe and socket buffers, swap, and `bw`'s own memory. | Seconds |
 
 ## How secure is it, honestly
 
@@ -221,7 +302,9 @@ from approving something harmful, and it does not defend a Mac that is already c
 - **What macOS does enforce:** the keychain item opens only for a program signed with
   wardenrun's certificate. A different certificate, an ad-hoc signature or an unsigned copy is
   refused (tested). Bitwarden's own macOS desktop app protects its biometric unlock at the
-  same level.
+  same level. One thing to know: while you are at the screen, macOS may show a **keychain
+  password dialog** for such a refused program. Typing your login-keychain password into it
+  would grant that program the item, so never answer a keychain dialog you did not start.
 - **The strongest control does not depend on macOS:** a dedicated Vaultwarden account in one
   organization that sees one collection, with a long random master password (24+ characters
   from a password manager). If everything on your Mac leaks, only that collection is exposed.
@@ -281,15 +364,16 @@ A secrets tool should be easy to audit. The design gives you these checks:
 
 - **No network calls of its own.** wardenrun contacts nothing; only `bw` talks to your
   Vaultwarden server. You can confirm it with a network monitor of your choice.
-- **`wardenrun doctor`** (planned) prints which protection level is active, the signature
-  flags, the hardening status, whether the pinned `bw` still matches, whether the keychain item
-  is readable, and the `bw` and Vaultwarden versions. It never prints a secret.
+- **`wardenrun doctor`** prints which protection level is active, the signature flags, the
+  hardening status, whether the pinned `bw` still matches, whether the keychain item is
+  readable and the `bw` version (see "Checking the installation"). It never prints a secret. It
+  makes no network call, so it does not check the Vaultwarden version.
 - **The signing certificate hash** will be published here and in [`SECURITY.md`](SECURITY.md)
   with the first release. Check your install with `codesign -d -r- "$(command -v wardenrun)"`:
   the requirement it prints must contain that hash. A different hash means a different signer.
 - **The audit log** is plain JSON lines: `tail -n 5 ~/Library/Logs/wardenrun/audit.jsonl`.
 - **The security-critical code is small and separated.** The platform-neutral core (masking,
-  the `bw` driver, environment handling) will live in `Sources/WardenrunCore/`; the macOS parts
+  the `bw` driver, environment handling) lives in `Sources/WardenrunCore/`; the macOS parts
   (keychain store, Touch ID approval, hardening) in `Sources/WardenrunMac/`.
   Read those two directories and you have read the part that matters.
 
@@ -314,6 +398,10 @@ Things worth knowing:
   about 510 characters, which would hide the tail of a command. wardenrun budgets 400
   characters and refuses anything longer: put it in a script file.
 - **Expect a few seconds of delay per approved run** (roughly 5 to 12 seconds of `bw` work).
+  Part of it is wardenrun checking `bw`'s code signature before every start, on purpose: it
+  took about 4 seconds on one Intel Mac (measured with the real signed `bw`). A cache for that
+  check would have to live outside the protected item, where an agent could forge it, so there
+  is none.
 - **Use the dedicated account.** Create a Vaultwarden account just for this, put it in one
   organization with one collection, and give it read-only access unless the agent needs `new`.
 
@@ -321,7 +409,10 @@ Things worth knowing:
 
 - A Mac with Touch ID: a built-in sensor, or a Magic Keyboard with Touch ID on an Apple Silicon desktop Mac.
 - The official Bitwarden CLI, `bw` **2026.9.0 or newer**, which needs **Vaultwarden 1.37.4 or
-  newer**. Older `bw` versions break against that Vaultwarden.
+  newer**. Older `bw` versions break against that Vaultwarden. It must be the **signed binary
+  from Bitwarden's GitHub releases**: the Homebrew and npm builds are Node scripts that load
+  code from folders no pin covers, and wardenrun refuses them.
+- Swift 6.0 or newer, to build from source while there is no release.
 - A Vaultwarden server reachable over **HTTPS** (`bw` refuses plain `http://`).
 - A dedicated Vaultwarden account in an organization, with one collection.
 - No Apple developer account.

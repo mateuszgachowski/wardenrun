@@ -119,6 +119,12 @@ against temporary keychains; the login keychain and the trust settings were not 
 2. **The README says plainly which tier is active.** `wardenrun doctor` prints it.
    Tier B is described as "approval enforced by wardenrun, storage restricted by the OS to
    the wardenrun binary", never as "Touch ID protected keychain".
+   *Known behavior, to be stated in the README and the threat model (row 2):* when another
+   program asks to read the item and a screen session exists, macOS may show a **keychain
+   password dialog** for that program ("<program> wants to use the keychain, enter the keychain
+   password"). Nobody answering means refused; typing the login-keychain password into such a
+   dialog grants that program the item. wardenrun's own reads never show it: it asks the
+   keychain not to prompt, and a read that would need a prompt fails.
 3. **Blast radius is limited at the vault, not only on the Mac.** wardenrun is designed to
    be used with a **dedicated low-privilege Vaultwarden account** that is a member of one
    organization and sees one collection. Even a total compromise of the stored master
@@ -324,6 +330,12 @@ Driver rules:
   the audit log (5.7), not the sheet.
 - Timeout 60 s (the sheet is invalidated by wardenrun). After 3 denials or timeouts in
   5 minutes: 60 s lock-out.
+- The limit's state lives in `~/.config/wardenrun/state/`: a `flock`ed file for "one sheet at
+  a time" and `approval-state.json` with the times of recent refusals (no names, no commands).
+  wardenrun is a one-shot process, so the files are the only memory it has. A process of the
+  same user can delete them and so lift the lock-out: the limit slows a pestering agent, it is
+  not a barrier against one that can delete files (threat 10). A state folder that cannot be
+  used makes the gate **refuse**, never approve.
 - Accepted limits of the system sheet: it shows the binary's file name and a generic "exec"
   icon, and it is localized by the system while our reason text is English. A richer UI can
   be added later as another `Approver` behind the protocol, but it is **not** part of v1.
@@ -392,7 +404,13 @@ later hardening.
 ### 5.8 State and configuration
 
 - `~/.config/wardenrun/config.toml`: preferences only (approval timeout, redaction text,
-  log path). Nothing in it can widen access.
+  log path). Nothing in it can widen access. **Deferred, not built in v1:** nothing reads this
+  file yet and the defaults are compiled in (timeout 60 s, redaction `[REDACTED:<item>]`, log
+  `~/Library/Logs/wardenrun/audit.jsonl`). It is listed so that no setting is ever added that
+  could widen access.
+- `~/.config/wardenrun/bin/bw`: the copy of the signed release `bw` that `setup` makes (folder
+  `0700`) and pins; `~/.config/wardenrun/bw.lock` keeps two wardenruns from using `bw` at once;
+  `~/.config/wardenrun/state/` holds the approval limit (5.3).
 - `~/.config/wardenrun/bw/`: wardenrun's **own** `BITWARDENCLI_APPDATA_DIR`, so it never
   touches or depends on the user's personal `bw` session.
 - **In the protected keychain item** (JSON blob): server URL, account e-mail, organization
@@ -400,8 +418,14 @@ later hardening.
   ID and absolute path of the signed release).
   Changing any of it goes through `wardenrun setup`, which needs the master password typed by
   a human at a TTY plus an approval dialog that shows old and new values (threat 15).
+  The order inside `setup` is fixed and tested: validate the answers, approval (nothing has
+  changed yet), copy `bw` and check the copy's signature, `bw logout` (a failure is ignored),
+  `bw config server`, `bw login` with the password on an inherited pipe, unlock and lock as
+  proof, and **only then** save the item and write the audit event. A failure before the save
+  leaves the item as it was; the `bw` profile may have been logged out.
 - `wardenrun doctor`: prints tier, signature flags, hardening status, `bw` pin status,
-  keychain item readability, Touch ID availability, server reachability. No secrets.
+  keychain item readability, Touch ID availability. No secrets. Server reachability is
+  **deferred**: `doctor` makes no network call.
 
 ## 6. Threat model
 
