@@ -24,3 +24,29 @@ public enum BwError: Error, Equatable, Sendable {
     case serverError(status: Int)
     case invalidUTF8(field: String)
 }
+
+extension BwError {
+    /// A fixed sentence for the person at the terminal. It never contains a byte that came from
+    /// the server, from `bw` or from a secret, not even for the cases that carry text.
+    public var summary: String {
+        switch self {
+        case .itemNotFound: return "no item with that name in the allowed collection"
+        case .ambiguous: return "more than one item has that name in the allowed collections"
+        case .alreadyExists: return "an item with that name already exists"
+        case .unsupportedField: return "the item has no such field"
+        case .binaryNotAllowed: return "the pinned bw is not usable"
+        case .signatureMismatch: return "the pinned bw does not carry the expected signature"
+        case .lockBusy: return "another wardenrun is using bw right now"
+        case .stateUnavailable: return "wardenrun's own state directory cannot be used"
+        case .cancelled: return "cancelled"
+        case .outputTooLarge: return "bw produced more output than wardenrun accepts"
+        case .notLoggedIn: return "bw is not logged in; run `wardenrun setup`"
+        case .spawnFailed: return "bw could not be started"
+        case .timeout: return "bw did not answer in time"
+        case .protocolError: return "bw answered in a way wardenrun does not understand"
+        case .unlockFailed: return "the vault could not be unlocked"
+        case .serverError: return "the vault server refused the request"
+        case .invalidUTF8: return "the item holds text that is not valid UTF-8"
+        }
+    }
+}
