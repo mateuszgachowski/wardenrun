@@ -95,6 +95,45 @@ struct DoctorRunnerTests {
         #expect(!report.render().contains("evil-VALUE"))
     }
 
+    /// Runs the doctor with a fake `bw` whose body is `script` and returns its `bw-version` line.
+    private func versionLine(script: String) throws -> CheckResult {
+        let home = tempDirectory()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let bw = home + "/bw"
+        try Data(("#!/bin/sh\n" + script + "\n").utf8).write(to: URL(fileURLWithPath: bw))
+        chmod(bw, 0o755)
+        let canonical = realpath(bw, nil).map { String(cString: $0) } ?? bw
+        let report = DoctorRunner.run(environment: [:], store: FakeStore(config: try config(bw: canonical)),
+                                      paths: WardenrunPaths(home: home), signature: AcceptingChecker(),
+                                      certificate: fakeCertificate, hardening: fakeHardening,
+                                      touchID: { CheckResult(name: "touch-id", status: .ok, detail: "ready") })
+        return try #require(report.checks.first { $0.name == "bw-version" })
+    }
+
+    @Test func aBwVersionOtherThanTheTestedOneIsMarkedUntestedNotWrong() throws {
+        let other = try versionLine(script: "echo 2025.1.0")
+        #expect(other.status == .info)
+        #expect(other.detail.contains("untested"))
+        let tested = try versionLine(script: "echo 2026.10.3")
+        #expect(!tested.detail.contains("untested"))
+        #expect(tested.detail.contains("tested with 2026.10."))
+    }
+
+    @Test func aVersionInAnUnexpectedFormIsAWarningAndIsNotEchoed() throws {
+        for output in ["echo 'v1; rm -rf /'", "echo 2026.10.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "printf '\\033[31mred'", "echo"] {
+            let line = try versionLine(script: output)
+            #expect(line.status == .warn, Comment(rawValue: output))
+            #expect(line.detail == "bw reported a version in an unexpected form" || line.detail == "bw did not report its version")
+            #expect(!line.detail.contains("rm -rf"))
+        }
+    }
+
+    @Test func aBwThatFailsToReportItsVersionIsAWarning() throws {
+        let line = try versionLine(script: "echo 2026.10.0; exit 3")
+        #expect(line.status == .warn)
+        #expect(line.detail == "bw did not report its version")
+    }
+
     @Test func theCertificateLineNamesTheSigner() throws {
         let check = DoctorRunner.certificateCheck()
         #expect(check.name == "certificate")
