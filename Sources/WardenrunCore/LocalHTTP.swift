@@ -143,7 +143,7 @@ public final class LocalHTTPClient: @unchecked Sendable {
 
         let body = try SecretBuffer(count: parsed.length) { raw in
             guard let base = raw.baseAddress else { return }
-            head.withUnsafeBytes { memcpy(base, $0.baseAddress! + end + 4, leftover) }
+            head.withUnsafeBytes { _ = memcpy(base, $0.baseAddress! + end + 4, leftover) }
             var got = leftover
             while got < raw.count {
                 let count = try readSome(base + got, raw.count - got, limit: limit)

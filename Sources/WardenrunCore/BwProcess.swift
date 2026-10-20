@@ -221,7 +221,11 @@ public enum BwProcess {
         #if canImport(Darwin)
         guard pipe(&fds) == 0 else { throw BwError.spawnFailed(errno: errno) }
         #else
-        guard pipe2(&fds, O_CLOEXEC) == 0 else { throw BwError.spawnFailed(errno: errno) }
+        // Swift's Glibc does not expose `pipe2`, and a plain `pipe` leaves a window in which a
+        // concurrent spawn would inherit the ends. A socketpair is created close-on-exec in
+        // one call and reads and writes like a pipe; only Linux (the CI tests) takes this path.
+        let ends = try SocketPair.make()
+        fds = [ends.0, ends.1]
         #endif
         let read = fcntl(fds[0], F_DUPFD_CLOEXEC, firstSpareDescriptor)
         let write = fcntl(fds[1], F_DUPFD_CLOEXEC, firstSpareDescriptor)
