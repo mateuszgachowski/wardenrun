@@ -9,8 +9,8 @@ import WardenrunMac
 // command could not be run / was not found; `run` otherwise returns the command's own status
 // (128 plus the signal number when it was killed).
 
-func say(_ text: String) { FileHandle.standardOutput.write(Data((text + "\n").utf8)) }
-func complain(_ text: String) { FileHandle.standardError.write(Data(("wardenrun: " + text + "\n").utf8)) }
+func say(_ text: String) { ProcessStart.write(STDOUT_FILENO, text + "\n") }
+func complain(_ text: String) { ProcessStart.write(STDERR_FILENO, "wardenrun: " + text + "\n") }
 
 /// The home directory from the user database, not from `$HOME`: the caller controls the
 /// environment, and `$HOME` decides where wardenrun's `bw` profile and state live.
@@ -24,7 +24,9 @@ func homeDirectory() -> String {
     return NSHomeDirectory()
 }
 
-// Hardening comes first, before anything that could hold a secret.
+// The starting state first (descriptors, SIGPIPE, SIGCHLD), then hardening, before anything that
+// could hold a secret.
+ProcessStart.prepare()
 let hardening = Hardening.apply()
 let environment = ProcessInfo.processInfo.environment
 
@@ -66,23 +68,23 @@ case .doctor:
     let report = DoctorRunner.run(environment: environment, store: KeychainAclStore(),
                                   paths: WardenrunPaths(home: homeDirectory()),
                                   hardening: { hardening + Hardening.selfCheck(environment: $0) })
-    FileHandle.standardOutput.write(Data(report.render().utf8))
+    ProcessStart.write(STDOUT_FILENO, report.render())
     exit(report.exitCode)
 case .setup(let options):
     refuseUnlessSafe()
     exit(SetupCommand.run(options: options, environment: environment, paths: WardenrunPaths(home: homeDirectory()),
                           store: KeychainAclStore(), output: say,
-                          errorOutput: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }))
+                          errorOutput: { ProcessStart.write(STDERR_FILENO, $0 + "\n") }))
 case .run(let options):
     refuseUnlessSafe()
     exit(RunCommand.run(options: options, environment: environment, paths: WardenrunPaths(home: homeDirectory()),
                         store: KeychainAclStore(),
-                        errorOutput: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }))
+                        errorOutput: { ProcessStart.write(STDERR_FILENO, $0 + "\n") }))
 case .new(let options):
     refuseUnlessSafe()
     exit(NewCommand.run(options: options, environment: environment, paths: WardenrunPaths(home: homeDirectory()),
                         store: KeychainAclStore(), output: say,
-                        errorOutput: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }))
+                        errorOutput: { ProcessStart.write(STDERR_FILENO, $0 + "\n") }))
 }
 #else
 FileHandle.standardError.write(Data("wardenrun runs on macOS only\n".utf8))

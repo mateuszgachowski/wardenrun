@@ -117,11 +117,12 @@ public enum RunCommand {
             stillMatches: { ExecResolver.stillMatches($0) },
             spawn: { executable, plain, secret, stdin, needles in
                 redactor.set(needles)
-                // From here the child runner owns the signals; an interrupt before this point
-                // ends the run instead.
-                if session.end() { throw RunError.interrupted }
+                // The child runner installs its own signal handlers and only then calls the hook,
+                // which hands the signals over: an interrupt that arrived before ends the run, and
+                // there is no moment in which a signal would find no handler.
                 return try ChildRunner.run(executable: executable, environment: plain, secretEnvironment: secret,
                                            stdin: stdin, needles: needles,
+                                           beforeStart: { if session.end(handingOver: true) { throw RunError.interrupted } },
                                            out: standardOutput, err: standardError)
             },
             audit: { event in
@@ -138,6 +139,8 @@ public enum RunCommand {
 final class VaultSession: @unchecked Sendable {
     private let lock = NSLock()
     private var watch: SignalWatch?
+    /// A watch that handed the signals over to `ChildRunner` and still owes the originals back.
+    private var handedOver: SignalWatch?
 
     /// `vault` is the one to cancel on an interrupt; tests that bring their own fetch pass nil.
     func begin(_ vault: BwVault?) {
@@ -149,15 +152,20 @@ final class VaultSession: @unchecked Sendable {
         old?.stop()
     }
 
-    /// Stops watching; true when an interrupt arrived while it was on.
+    /// Stops watching; true when an interrupt arrived while it was on. With `handingOver` the
+    /// handlers are left alone (the child runner has installed its own) and the originals come
+    /// back at the next plain `end()`.
     @discardableResult
-    func end() -> Bool {
+    func end(handingOver: Bool = false) -> Bool {
         lock.lock()
         let current = watch
         watch = nil
+        let pending = handedOver
+        handedOver = handingOver ? current : nil
         lock.unlock()
+        pending?.restoreOriginals()
         let fired = current?.fired != nil
-        current?.stop()
+        current?.stop(restoreHandlers: !handingOver)
         return fired
     }
 }

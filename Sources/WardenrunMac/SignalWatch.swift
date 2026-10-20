@@ -2,12 +2,14 @@
 import Darwin
 import Foundation
 
-/// Watches for HUP, INT and TERM while wardenrun talks to `bw` and prepares a run, so that an
-/// interrupt ends the `bw` session (and locks the vault) instead of killing wardenrun and leaving
-/// an unlocked `bw serve` behind. Once the command has started, `ChildRunner` takes the signals
-/// over. `stop()` puts the previous handlers back and may be called any number of times.
+/// Watches for the signals `ChildRunner` forwards (HUP, INT, QUIT, TERM, USR1, USR2) while
+/// wardenrun talks to `bw` and prepares a run, so that an interrupt ends the `bw` session (and
+/// locks the vault) instead of killing wardenrun and leaving an unlocked `bw serve` and a secret
+/// file behind. `ChildRunner` installs its own handlers first and then calls the start hook,
+/// which stops this watch, so there is no moment without a handler. `stop()` puts the previous
+/// handlers back and may be called any number of times.
 final class SignalWatch: @unchecked Sendable {
-    static let defaultSignals: [Int32] = [SIGHUP, SIGINT, SIGTERM]
+    static let defaultSignals: [Int32] = ChildRunner.forwardedSignals
 
     private let lock = NSLock()
     private var sources: [DispatchSourceSignal] = []
@@ -44,12 +46,20 @@ final class SignalWatch: @unchecked Sendable {
         return firedSignal
     }
 
-    func stop() {
+    /// Stops watching. With `restoreHandlers: false` the dispositions are left as somebody else set
+    /// them in the meantime (`ChildRunner` installs its own before the hand-over); the caller then
+    /// puts the originals back with `restoreOriginals()` when it is done.
+    func stop(restoreHandlers: Bool = true) {
         lock.lock()
         if stopped { lock.unlock(); return }
         stopped = true
         lock.unlock()
         for source in sources { source.cancel() }
+        if restoreHandlers { restoreOriginals() }
+    }
+
+    /// Puts back the dispositions the signals had before this watch existed.
+    func restoreOriginals() {
         for entry in previous {
             var action = entry.action
             sigaction(entry.signal, &action, nil)

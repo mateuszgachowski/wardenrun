@@ -186,19 +186,21 @@ wardenrun run <item> [--env VAR=field]... [--file VAR=field]... [--stdin field] 
 ```
 
 1. **Self-check** (no secrets involved): hardened-runtime flag present, no `DYLD_*`, a window
-   server session exists (otherwise deny: no remote approval), `PT_DENY_ATTACH`, core dumps off.
+   server session exists (otherwise refuse to start, exit 78: no remote approval), `PT_DENY_ATTACH`, core dumps off.
 2. **Resolve the request**: look `cmd` up on the caller's `PATH` to an absolute path, hash
    that executable, record cwd and the parent chain (`proc_pidpath` up to the terminal).
-   Build the approval text (5.3); reject argv containing NUL, and any command that does not
-   fit the 400-character budget: a command too long to review is not approved.
+   Reject argv containing NUL.
 3. **Read the protected item** from the `SecretStore` (master password + pinned settings).
    This comes *before* the question, so that a Mac that is not set up fails (exit 1) without
-   asking anyone anything. Nothing is fetched from the vault yet. (Call made during the
+   asking anyone anything. Nothing is fetched from the vault yet. Only then is the approval
+   text (5.3) built: a command that does not fit the 400-character budget is not approved
+   (audit `denied`, exit 77), and the sheet lists where the flags send the secret. (Call made during the
    implementation of `run`; the first draft read the item after the approval. The sheet text
    does not depend on it.)
 4. **Rate limit**: one pending prompt, cool-down after repeated denials.
-5. **Approval** (5.3). Deny, timeout, no sensor, no screen session, lock-out, or a text over
-   the budget: audit (`denied`, `timeout` or `error`), exit 77, nothing fetched. Approved:
+5. **Approval** (5.3). Deny, timeout, no sensor, lock-out, or a text over the budget: audit
+   (`denied`, `timeout` or `error`), exit 77, nothing fetched. (No screen session never gets
+   here: the start-up check refuses it with exit 78 before step 1, nothing audited.) Approved:
    audit line `approved` is written now, before anything is fetched.
 6. **Fetch the one item** through `bw` (5.2): unlock, sync, list the allowed collection only,
    pick the exact-name match (exactly one, or fail), lock. The session is discarded
@@ -210,7 +212,9 @@ wardenrun run <item> [--env VAR=field]... [--file VAR=field]... [--stdin field] 
    child inherits only descriptors 0, 1 and 2. stdout and stderr are pipes through the masker
    (5.5). `HUP`, `INT`, `QUIT`, `TERM`, `USR1` and `USR2` sent to wardenrun are forwarded to
    the child, which stays in wardenrun's process group; the exit status is propagated (128+n
-   for a signal; 126 and 127 when the command cannot be run or found, as a shell would).
+   for a signal; 126 and 127 when the command cannot be run or found, as a shell would). A
+   signal that arrives before the command starts ends the run instead: nothing starts, the vault
+   is locked, exit 1.
 8. **Clean up** temp files, zero buffers, write the audit line `finished` with the exit
    status and the duration (5.7).
 
@@ -328,18 +332,24 @@ Driver rules:
   closing `[end]` makes any truncation by a future OS version visible.
 - **Escaping:** control characters, newlines and bidirectional overrides are shown as
   visible escapes (`\n`, `\u{202E}`); arguments with spaces or quotes are shown shell-quoted;
-  a non-ASCII character in the executable path or `argv[0]` adds a `[non-ASCII]` tag. This
+  a non-ASCII character in the executable path, the item name or any argument adds a
+  `[non-ASCII]` tag, and spaces other than the ASCII space and blank-looking characters are
+  escaped as well. This
   stops a command from forging the system's own surrounding sentence or reordering itself.
 - **Soft warning tags** (never auto-deny): `[shell -c]` for `sh/bash/zsh -c` and
   `python -c`, `[network]` for `curl`, `wget`, `nc`, `ssh`, `scp`, `[env dump]` for
   `env`/`printenv`, `[exe changed]` when the executable hash differs from the last
-  approval for this item, `[writable exe]` when the executable or its directory is writable by
+  approval for this item and path (advice only: the log it is read from is not a trust
+  anchor, and a program at a new path has nothing to compare with), `[writable exe]` when the executable or its directory is writable by
   the current user (typical for scripts and tools in a project, absent for system binaries),
   `[env: NAME]` for each variable in the child's environment that makes ordinary programs run
-  somebody's code at startup (`NODE_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, ...; the sheet shows the
-  command but not the environment), `[non-ASCII]`.
-- Details that do not fit (executable SHA-256, cwd, full parent chain, variable names) go to
-  the audit log (5.7), not the sheet.
+  somebody's code at startup (`NODE_OPTIONS`, `BASH_ENV`, `LD_PRELOAD`, `DEVELOPER_DIR`, `GIT_SSH`, proxy and CA-bundle
+  variables, ...; the list is not complete and the sheet shows the command but not the
+  environment), `[non-ASCII]`. With flags the sheet says where the secret goes (`as $VAR,
+  file $VAR, stdin`); without flags the item's `env:` fields are injected and cannot be named
+  before the item is read. The parent's name is the process's own and only a hint.
+- Details that do not fit (executable SHA-256, cwd, full parent chain) go to the audit log
+  (5.7), not the sheet; the injection targets are on both (`injected`).
 - Timeout 60 s (the sheet is invalidated by wardenrun). After 3 denials or timeouts in
   5 minutes: 60 s lock-out.
 - The limit's state lives in `~/.config/wardenrun/state/`: a `flock`ed file for "one sheet at
@@ -356,10 +366,13 @@ Driver rules:
 
 | Mode | How | Exposure |
 |---|---|---|
-| `--env VAR=field` (default) | environment of the child | readable by same-user `ps eww` for the child's lifetime (threat 9) |
+| `--env VAR=field` | environment of the child | readable by same-user `ps eww` for the child's lifetime (threat 9) |
 | `--file VAR=field` | file `0600`, named after the (validated) variable, in a fresh `0700` directory `wardenrun-XXXXXX` under the per-user temporary directory (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, not `$TMPDIR`, which the caller controls), path in `VAR`, removed when the child ends (also after a forwarded signal) | readable by the same user while it exists; **left behind** if wardenrun gets `SIGKILL` (or `TERM` in the instants before the child starts) |
 | `--stdin field` | written to the child's stdin pipe, then closed | not visible to `ps`; only works for tools that read secrets from stdin |
 
+The target `VAR` of `--env` and `--file` may not be a name that chooses a program or a directory:
+`HOME`, `PATH`, `TMPDIR`, `SHELL`, `USER`, `LOGNAME`, `PWD`, `OLDPWD`, `CDPATH`, `MANPATH`, any
+`XDG_*`, `GIT_*` or `NPM_CONFIG_*`, and the risky names of 5.3 (the agent picks the name).
 `field` is `password`, `username`, `notes`, `uri`, or the name of a custom field. `totp` parses
 but is refused: the vault holds the seed, not a code, and handing out the seed would be a
 different feature. A field that is missing or empty is an error (never an empty variable); a
@@ -492,7 +505,8 @@ profile on disk.
 | 16 | While one approved run is in flight, read the master password or `BW_SESSION` from `bw`'s environment (`ps eww`; `bw` is not an Apple platform binary) and use `BW_SESSION` + `data.json` to decrypt the **whole cached collection** offline | **Not protected on rungs b and c** of 5.2.6: one approval can leak every item the dedicated account sees. Window of a few seconds, and it needs an agent polling `ps` at that moment. | Rung a (`bw serve` on a socketpair) removes both secrets from env and argv. The dedicated account bounds the damage to its one collection. This is the main reason PR3 starts with a spike. |
 | 17 | Read the access/refresh tokens (or API-key secret) from wardenrun's `bw` profile (`data.json`, mode `0600`, same user) and call the Vaultwarden API as the dedicated account | **Not protected.** Can read the encrypted vault (offline guessing of a strong master password is the next step), and delete or alter items the account may write. | Dedicated account; long random master password; Argon2id; read-only collection permission when `new` is not used; `logout_after_run`; password login instead of API key (no long-lived secret on disk) |
 | 18 | The maintainer's signing key leaks, or a malicious release is published | **Not protected for users who installed that release.** A binary signed with the leaked key passes the keychain ACL and could read the stored item after one approval. | Key only in a CI secret plus one offline backup; releases carry a GitHub Artifact Attestation and published hashes; certificate rotation procedure (everyone re-runs `setup`); `SECURITY.md` for reporting. Same trust anchor as any package maintainer. |
-| 19 | The agent kills wardenrun with `kill -9` while a run is in progress | **Not protected, limited.** Catchable signals (`HUP`, `INT`, `QUIT`, `TERM`) end a run cleanly; `SIGKILL` cannot be caught, so a `--file` secret stays on disk and a `bw serve` that was already unlocked may keep running with no one holding its end of the private socket (to be checked by the integration tests, spike Q5). The agent learns no new secret from this; the window of an exposure that the approval already allowed gets longer. | Files are `0600` in a `0700` folder; the stale-process cleanup idea (pid file beside `bw.lock`, kill a stale group at the next acquire) is recorded and not built. |
+| 19 | The agent kills wardenrun with `kill -9` while a run is in progress | **Not protected, limited.** Catchable signals (`HUP`, `INT`, `QUIT`, `TERM`, `USR1`, `USR2`) end a run cleanly; `SIGKILL` cannot be caught, so a `--file` secret stays on disk and a `bw serve` that was already unlocked may keep running with no one holding its end of the private socket (to be checked by the integration tests, spike Q5). The agent learns no new secret from this; the window of an exposure that the approval already allowed gets longer. | Files are `0600` in a `0700` folder; the stale-process cleanup idea (pid file beside `bw.lock`, kill a stale group at the next acquire) is recorded and not built. |
+| 20 | Bend an approved command through its environment or the files it reads (`PATH`, `~/.npmrc`, `.gitconfig`, tool variables that are not tagged) | **Not protected, limited.** An honest program can be made to run the agent's code or send the secret elsewhere; the sheet cannot show the whole environment. | Tags for risky variables (5.3); `--env`/`--file` targets that choose a program or a directory are refused (5.4); the injection targets are on the sheet and in the audit log; prefer `--stdin`. |
 
 **Out of scope:** root or malware on the machine; a user who approves without reading;
 a physically stolen unlocked Mac; the security of Vaultwarden/`bw` themselves.

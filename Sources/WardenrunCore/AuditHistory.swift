@@ -6,11 +6,12 @@ extension AuditLog {
 
     /// The program hash recorded by the newest `approved` line for this item and executable path,
     /// or nil: no such line in the last `historyWindow` bytes, no log, an unreadable one. The
-    /// approval text uses it to say `[executable changed]`; a nil only means "nothing to compare
+    /// approval text uses it to say `[exe changed]`; a nil only means "nothing to compare
     /// with", never an error, and a damaged line is skipped (the log is not a trust anchor,
-    /// threat model row 11).
+    /// threat model row 11): anybody who can write the log can forge or hide the tag, so it is advice, not proof.
     public static func lastApprovedHash(path: String, item: String, executable: String) -> String? {
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        // O_NONBLOCK: a FIFO put in the log's place must not stop the run before the sheet is shown.
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var info = stat()

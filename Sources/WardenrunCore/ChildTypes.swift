@@ -29,4 +29,6 @@ public enum StdinSource: Sendable {
 public enum ChildError: Error, Equatable, Sendable {
     case spawnFailed(errno: Int32)
     case pipeFailed(errno: Int32)
+    /// The child's end could not be collected, so its status is unknown.
+    case waitFailed(errno: Int32)
 }

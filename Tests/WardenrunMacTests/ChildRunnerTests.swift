@@ -28,9 +28,11 @@ private func shell(_ script: String) throws -> ResolvedExecutable {
 @discardableResult
 private func run(_ executable: ResolvedExecutable, environment: [String: String] = ["PATH": "/bin:/usr/bin"],
                  secretEnvironment: [String: SecretBuffer] = [:], stdin: StdinSource = .inherit,
-                 needles: [Needle] = [], collected: Collected = Collected()) throws -> (result: ChildResult, collected: Collected) {
+                 needles: [Needle] = [], collected: Collected = Collected(),
+                 beforeStart: () throws -> Void = {}) throws -> (result: ChildResult, collected: Collected) {
     let result = try ChildRunner.run(executable: executable, environment: environment, secretEnvironment: secretEnvironment,
-                                     stdin: stdin, needles: needles, out: { collected.addOut($0) }, err: { collected.addErr($0) })
+                                     stdin: stdin, needles: needles, beforeStart: beforeStart,
+                                     out: { collected.addOut($0) }, err: { collected.addErr($0) })
     return (result, collected)
 }
 
@@ -231,6 +233,66 @@ struct ChildRunnerTests {
 
     @Test func theForwardedSignalListIsExactlyTheDocumentedOne() {
         #expect(ChildRunner.forwardedSignals == [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2])
+    }
+    @Test func aFailedCommandIsNotReportedAsSuccessWhenTheCallerIgnoredSIGCHLD() throws {
+        // A parent that ignores SIGCHLD passes that setting through exec; the kernel then reaps the
+        // children by itself and a naive waitpid reports nothing.
+        var ignore = sigaction(), old = sigaction()
+        ignore.__sigaction_u.__sa_handler = SIG_IGN
+        sigemptyset(&ignore.sa_mask)
+        sigaction(SIGCHLD, &ignore, &old)
+        defer { sigaction(SIGCHLD, &old, nil) }
+        let outcome = try run(try shell("exit 3"))
+        #expect(outcome.result.end == .exited(3))
+        #expect(outcome.result.exitCode == 3)
+    }
+
+    @Test func anExitStatusThatCannotBeCollectedIsAnErrorNotASuccess() throws {
+        // The hook runs after the runner reset SIGCHLD; ignoring it again makes the kernel reap the child.
+        var ignore = sigaction()
+        ignore.__sigaction_u.__sa_handler = SIG_IGN
+        sigemptyset(&ignore.sa_mask)
+        defer {
+            var normal = sigaction()
+            normal.__sigaction_u.__sa_handler = SIG_DFL
+            sigemptyset(&normal.sa_mask)
+            sigaction(SIGCHLD, &normal, nil)
+        }
+        do {
+            _ = try run(try shell("exit 3"), beforeStart: { sigaction(SIGCHLD, &ignore, nil) })
+            Issue.record("expected an error instead of a made-up status")
+        } catch let error as ChildError {
+            guard case .waitFailed = error else { Issue.record("wrong error: \(error)"); return }
+        }
+    }
+
+    @Test func theSignalHandlersAreInstalledBeforeTheStartHookRuns() throws {
+        nonisolated(unsafe) var handledDuringHook = false
+        _ = try run(try shell("exit 0"), beforeStart: {
+            var current = sigaction()
+            sigaction(SIGTERM, nil, &current)
+            handledDuringHook = (current.sa_flags & SA_SIGINFO) != 0
+        })
+        #expect(handledDuringHook, "a signal in the gap between the watch and the runner would kill wardenrun")
+    }
+
+    @Test func aStartHookThatThrowsStartsNothingAndRestoresTheSignals() throws {
+        let dir = NSTemporaryDirectory() + "wardenrun-hook-" + UUID().uuidString
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let marker = dir + "/started"
+        var before = sigaction()
+        sigaction(SIGTERM, nil, &before)
+        do {
+            _ = try run(try shell("touch \(marker)"), beforeStart: { throw RunError.interrupted })
+            Issue.record("expected the hook's error")
+        } catch let error as RunError {
+            #expect(error == .interrupted)
+        }
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        var after = sigaction()
+        sigaction(SIGTERM, nil, &after)
+        #expect(after.sa_flags == before.sa_flags)
     }
 }
 #endif

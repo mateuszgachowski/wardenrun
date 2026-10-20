@@ -105,5 +105,33 @@ struct EnvPolicyTests {
     @Test func riskyVariablesIsEmptyForAnOrdinaryEnvironment() {
         #expect(EnvPolicy.riskyVariables(in: ["PATH": "/usr/bin", "HOME": "/h", "LANG": "C", "TERM": "xterm"]).isEmpty)
     }
-}
 
+    @Test func variablesThatRedirectWhatAnOrdinaryProgramRunsAreRisky() {
+        let names = ["DEVELOPER_DIR", "TOOLCHAINS", "GIT_SSH", "GIT_PROXY_COMMAND", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+                     "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "ALL_PROXY",
+                     "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+                     "NPM_CONFIG_SCRIPT_SHELL", "npm_config_prefix", "NPM_CONFIG_USERCONFIG"]
+        for name in names {
+            #expect(EnvPolicy.riskyVariables(in: [name: "x"]) == [name], "\(name)")
+        }
+    }
+
+    @Test func ordinaryAndNpmScriptVariablesAreNotRisky() {
+        let environment = ["PATH": "/usr/bin", "HOME": "/Users/x", "LANG": "en_US.UTF-8", "TERM": "xterm", "USER": "x",
+                           "SHELL": "/bin/zsh", "TMPDIR": "/tmp", "EDITOR": "vi", "PAGER": "less",
+                           "npm_config_user_agent": "npm/10", "npm_config_cache": "/c", "npm_lifecycle_event": "test"]
+        #expect(EnvPolicy.riskyVariables(in: environment).isEmpty)
+    }
+
+    @Test(arguments: ["HOME", "PATH", "TMPDIR", "SHELL", "USER", "LOGNAME", "PWD", "OLDPWD", "CDPATH", "XDG_CACHE_HOME",
+                      "XDG_CONFIG_HOME", "GIT_DIR", "GIT_SSH", "GIT_WORK_TREE", "DEVELOPER_DIR", "BASH_ENV", "NODE_OPTIONS",
+                      "PYTHONPATH", "HTTPS_PROXY", "NPM_CONFIG_PREFIX", "npm_config_cache"])
+    func namesThatChangeHowProgramsBehaveAreRefusedAsInjectionTargets(name: String) {
+        #expect(throws: EnvPolicyError.forbiddenName(name)) { try EnvPolicy.validateInjectedName(name) }
+    }
+
+    @Test(arguments: ["NPM_TOKEN", "GITHUB_TOKEN", "API_KEY", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY", "MY_HOME", "HOMEBREW_TOKEN", "TOKEN"])
+    func ordinaryCredentialNamesStayAllowedAsInjectionTargets(name: String) throws {
+        try EnvPolicy.validateInjectedName(name)
+    }
+}

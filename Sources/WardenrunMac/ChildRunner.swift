@@ -44,6 +44,7 @@ public enum ChildRunner {
 
     public static func run(executable: ResolvedExecutable, environment: [String: String],
                            secretEnvironment: [String: SecretBuffer], stdin: StdinSource, needles: [Needle],
+                           beforeStart: () throws -> Void = {},
                            out: @escaping @Sendable ([UInt8]) -> Void,
                            err: @escaping @Sendable ([UInt8]) -> Void) throws -> ChildResult {
         runLock.lock()
@@ -57,6 +58,16 @@ public enum ChildRunner {
         for value in environment.values where value.utf8.contains(0) { throw ChildError.spawnFailed(errno: EINVAL) }
         for value in secretEnvironment.values where value.withUnsafeBytes({ $0.contains(0) }) { throw ChildError.spawnFailed(errno: EINVAL) }
         if executable.argv.contains(where: { $0.utf8.contains(0) }) { throw ChildError.spawnFailed(errno: EINVAL) }
+
+        // A parent that ignores SIGCHLD passes that through exec, and then the kernel reaps the
+        // child by itself: the wait below would fail and a failed command would look like a success.
+        var defaultAction = sigaction()
+        defaultAction.__sigaction_u.__sa_handler = SIG_DFL
+        sigemptyset(&defaultAction.sa_mask)
+        sigaction(SIGCHLD, &defaultAction, nil)
+
+        // Looked at before any pipe exists: a closed descriptor 0 would otherwise be taken by one.
+        let standardInputIsOpen = fcntl(0, F_GETFD) >= 0
 
         var toClose: [Int32] = []
         defer { for descriptor in toClose { close(descriptor) } }
@@ -92,7 +103,7 @@ public enum ChildRunner {
         }
         if let stdinPipe {
             posix_spawn_file_actions_adddup2(&actions, stdinPipe.read, 0)
-        } else if fcntl(0, F_GETFD) >= 0 {
+        } else if standardInputIsOpen {
             posix_spawn_file_actions_addinherit_np(&actions, 0)
         } else {
             posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
@@ -105,6 +116,10 @@ public enum ChildRunner {
         posix_spawnattr_setsigdefault(&attributes, &defaultSignals)
         posix_spawnattr_setsigmask(&attributes, &noSignals)
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
+
+        // The handlers are in; whoever watched until now hands over (and may say that an interrupt
+        // already arrived, which ends the run before anything starts).
+        try beforeStart()
 
         var pid: pid_t = 0
         let result = withEnvironment(plain: environment, secret: secretEnvironment) { envp in
@@ -141,7 +156,12 @@ public enum ChildRunner {
         while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) != 0 && errno == EINTR {}
         state.markExited()
         var status: Int32 = 0
-        while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+        var waitError: Int32 = 0
+        while waitpid(pid, &status, 0) < 0 {
+            if errno == EINTR { continue }
+            waitError = errno
+            break
+        }
 
         var sentinel: UInt8 = 0
         _ = write(signalPipe.write, &sentinel, 1)
@@ -149,6 +169,7 @@ public enum ChildRunner {
         close(signalPipe.read)
         // the write end of the signal pipe and any leftover ends are closed by the deferred loop
 
+        if waitError != 0 { throw ChildError.waitFailed(errno: waitError) }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
         if status & 0x7F == 0 {
             let code = (status >> 8) & 0xFF
