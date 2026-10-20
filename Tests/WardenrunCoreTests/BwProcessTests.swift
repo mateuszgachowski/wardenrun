@@ -3,7 +3,8 @@ import Testing
 @testable import WardenrunCore
 
 struct BwProcessTests {
-    private let shell = BwLaunchSpec(executable: "/bin/sh", leadingArguments: ["-c"], pinnedDirectories: [])
+    // bash and not sh: on Linux sh is dash, which cannot redirect to a descriptor above 9.
+    private let shell = BwLaunchSpec(executable: "/bin/bash", leadingArguments: ["-c"], pinnedDirectories: [])
     private let plainEnvironment = ["PATH": "/usr/bin:/bin"]
 
     private func runShell(_ script: String, _ extra: [String] = [], environment: [String: String]? = nil,
