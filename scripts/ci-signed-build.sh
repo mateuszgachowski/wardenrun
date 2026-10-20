@@ -90,6 +90,9 @@ done
 status=0
 "$binary" run </dev/null >/dev/null 2>&1 || status=$?
 [ "$status" -eq 64 ] || { echo "ci: expected exit 64 for a bad command line, got $status" >&2; exit 1; }
+status=0
+"$binary" new item --length 3 </dev/null >/dev/null 2>&1 || status=$?
+[ "$status" -eq 64 ] || { echo "ci: expected exit 64 for new with a length of 3, got $status" >&2; exit 1; }
 "$binary" version | grep -q '^wardenrun '
 "$binary" help | grep -q '^usage:'
 echo "ci: signed binary checks passed"

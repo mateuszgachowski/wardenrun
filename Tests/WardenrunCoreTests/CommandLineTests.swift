@@ -225,4 +225,11 @@ struct UsageTextTests {
     @Test func theHelpTextClaimsNothingTheDesignDoesNotSay() {
         #expect(!Usage.text.lowercased().contains("touch id protected"))
     }
+
+    @Test func theHelpTextDoesNotOfferTheFieldRunRefuses() {
+        let fieldLine = Usage.text.split(separator: "\n").first { $0.hasPrefix("field is") }.map(String.init) ?? ""
+        #expect(fieldLine.contains("password") && fieldLine.contains("notes"))
+        #expect(!fieldLine.contains("totp, "), "totp is refused by run, so the list must not offer it")
+        #expect(Usage.text.contains("totp is not supported"))
+    }
 }

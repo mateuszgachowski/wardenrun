@@ -19,13 +19,13 @@ daemon, no telemetry.
 ## Status
 
 wardenrun is **pre-release**. The design is written and approved
-([`docs/DESIGN.md`](docs/DESIGN.md)). In code so far: the engine that talks to `bw` (tested
-against a fake `bw serve`; the test against a real Vaultwarden is still to come), the macOS
-layer (keychain item, Touch ID approval, hardening), and two commands, `wardenrun doctor` and
-`wardenrun setup`. **`wardenrun run` and `wardenrun new`, the commands that matter, are not built
-yet**, and there is no release, so there is nothing to install. The sections below describe how
-wardenrun is **designed** to behave; each claim is checked against that design before it is
-written down, and "tested" always says what was tested.
+([`docs/DESIGN.md`](docs/DESIGN.md)). The code for every command now exists: `wardenrun run`,
+`wardenrun new`, `wardenrun setup` and `wardenrun doctor`, on top of the engine that talks to `bw`
+and the macOS layer (keychain item, Touch ID approval, hardening). What has **not** happened yet:
+the tests against a real Vaultwarden server, a run of the whole thing with a real fingerprint on
+a real sensor, and a release. So there is no signed build and nothing to install, and the
+sections below describe how wardenrun is **designed** to behave; each claim is checked against
+the code and the design before it is written down, and "tested" always says what was tested.
 
 > Not available yet. This is the install command that will work once the first release exists:
 >
@@ -64,11 +64,77 @@ agent needs the value, it runs `wardenrun run`, and then:
 |-----------|--------------|-------------------------------------------|
 | nothing | Custom fields named `env:VAR` on the vault item become environment variables `VAR` (the item itself says which variables it provides) | Yes, with `ps eww`, while the command runs |
 | `--env VAR=field` | The item's `field` becomes the environment variable `VAR` | Same |
-| `--file VAR=field` | `field` is written to a private `0600` temporary file; `VAR` holds its path; the file is deleted on exit | Readable by your user while the file exists |
+| `--file VAR=field` | `field` is written to a private `0600` temporary file; `VAR` holds its path; the file is deleted when the command ends | Readable by your user while the file exists |
 | `--stdin field` | `field` is written to the command's standard input | No |
 
-`field` is `password`, `username`, `totp`, `notes`, `uri`, or the name of a custom field. The
-default (first row) is the least private option; prefer `--stdin` when the tool allows it.
+`field` is `password`, `username`, `notes`, `uri`, or the name of a custom field. (`totp` is not
+supported yet: it would hand out the stored seed, not a code.) The default (first row) is the
+least private option; prefer `--stdin` when the tool allows it.
+
+A field that does not exist or is empty is an error, never an empty variable. A value that
+contains a NUL byte cannot be an environment variable; it can only travel through `--stdin` or
+`--file`.
+
+## Using it
+
+```text
+wardenrun run <item> [--env VAR=field]... [--file VAR=field]... [--stdin field] -- <command> [args...]
+wardenrun new <name> [--username U] [--uri URL] [--env VAR] [--length 32] [--charset alnum|full]
+wardenrun setup [--bw PATH]
+wardenrun doctor
+wardenrun version | help
+```
+
+What `run` shows, in order. The command is looked up on your `PATH`, hashed and written into the
+sheet as the full path plus the arguments, so the sheet shows what will really start:
+
+```text
+$ wardenrun run example-api -- python3 deploy.py
+        (macOS Touch ID sheet:  use secret "example-api" to run: /usr/bin/python3 deploy.py
+                                (from claude) [end]          ... you touch the sensor)
+deploying...
+server answered: token [REDACTED:example-api] accepted
+$ echo $?
+0
+```
+
+Tags such as `[shell -c]`, `[network]`, `[env dump]`, `[writable exe]`, `[exe changed]` (the
+program is not the one you approved last time for this item), `[non-ASCII]` and `[env: NAME]`
+(a risky variable such as `NODE_OPTIONS` is set) appear in front of the text when they apply.
+
+`new` asks first and then prints exactly one line, never the password:
+
+```text
+$ wardenrun new staging-db-admin --length 32
+        (macOS Touch ID sheet:  create item "staging-db-admin" in collection <id>; password of
+                                32 characters (letters and digits), never shown (from claude) [end])
+created "staging-db-admin" (id 5a1c...) in 9f2e...
+```
+
+`--charset full` adds symbols (`!#%&()*+,-./:;<=>?@[]^_{|}~`); the default `alnum` is letters and
+digits. The length is 16 to 128. With `--env VAR` the password is stored as the custom field
+`env:VAR`, so a later `wardenrun run <name> -- ...` injects it with no flags; without it, it is
+the item's password. A name that already exists in the collection is an error, found before
+anything is created.
+
+### Exit codes
+
+The agent can tell "you said no" from "the command failed" by the exit code.
+
+| Code | Meaning |
+|------|---------|
+| 0 | `run`: the command succeeded. `new`, `setup`, `doctor`: done. |
+| the command's own | `run` passes the command's exit status through unchanged. |
+| 128 + n | `run`: the command was killed by signal n (130 is Ctrl-C). |
+| 1 | wardenrun itself failed: not set up, the keychain item cannot be read, vault or `bw` error, item or field missing, the program changed after you approved it, or `doctor` found a `FAIL` |
+| 64 | Bad command line: unknown option, no command after `--`, an argument with a NUL byte, `setup` without a terminal |
+| 70 | Not macOS |
+| 77 | **Not approved:** you said no, the 60 s ran out, no Touch ID or no screen session, the lock-out is active, or the command was too long to review. Nothing was fetched. |
+| 78 | Refused to start in an unsafe state (see "How secure is it") |
+| 126 / 127 | The command was found but cannot be run / was not found (the same numbers a shell uses) |
+
+A command that itself exits with 77 looks like a refusal to the caller. The audit log tells
+them apart: only a command that really ran gets a `finished` line, with its exit status.
 
 ## How the data flows
 
@@ -82,12 +148,17 @@ each one, how, and whether another process of your macOS user could watch it.
       ▼
 ┌─ wardenrun: one short-lived process, no daemon ────────────────────────────┐
 │                                                                            │
-│ (2) the exact command ──────────────▶  macOS Touch ID sheet                │
-│     ◀───────────── yes or no ───────   (you, at the screen)                │
+│ (2) master password + settings ◀────   macOS keychain                      │
+│     (read first, so that a Mac that is (one item, opens only for           │
+│      not set up fails before any         wardenrun's signature)            │
+│      question is asked; nothing is                                         │
+│      fetched from the vault yet)                                           │
 │                                                                            │
-│ (3) master password + settings ◀────   macOS keychain                      │
-│                                        (one item, opens only for           │
-│                                         wardenrun's signature)             │
+│ (3) the exact command ──────────────▶  macOS Touch ID sheet                │
+│     ◀───────────── yes or no ───────   (you, at the screen)                │
+│     a "no", a timeout, no sensor: stop here, exit code 77                  │
+│                                                                            │
+│ (9) audit line "approved" is written now, BEFORE anything is fetched       │
 │                                                                            │
 │ (4) master password ──▶  bw  ◀──(5) HTTPS──▶  Vaultwarden                  │
 │ (6) collection's items ◀─┘ (official CLI)     (your server)                │
@@ -95,6 +166,9 @@ each one, how, and whether another process of your macOS user could watch it.
 │     the secret is now in wardenrun's memory (bw held it only briefly)      │
 │                                                                            │
 │     then bw is told to lock, and the password is zeroed                    │
+│                                                                            │
+│     the program file is hashed once more: if it changed since the          │
+│     sheet, nothing starts                                                  │
 │                                                                            │
 └────────────────────────────────────────────────────────────────────────────┘
       │ (7) secret handed to the approved command: environment variable,
@@ -108,40 +182,46 @@ each one, how, and whether another process of your macOS user could watch it.
       ▼
   AI agent sees only the masked output
 
-  (9) meanwhile: one audit-log line (names and your decision, never values)
+  (9) when the command ends: a second audit line "finished" (exit status, duration)
+      (names and your decision, never values)
 ```
 
 | # | What travels | How it travels | Can another process of your user see it? |
 |---|--------------|----------------|-------------------------------------------|
 | 1 | The command line the agent wants to run | Normal command-line arguments (`argv`) of the `wardenrun` process | Yes, and it does not matter: the agent wrote it. It contains item *names*, never values. |
-| 2 | The approval text: the program, its arguments and the parent process | Shown by macOS itself in the Touch ID sheet. At most 400 characters; a longer command is **denied**, never shortened. | No. It is drawn on your screen. Only a yes or a no comes back, from the OS. |
-| 3 | The master password of the dedicated account, plus settings (server address, collection, pinned `bw`) | Read from one macOS keychain item into wardenrun's memory | Not the item: macOS opens it only for programs signed with wardenrun's certificate (tested with a prototype). After the read it lives in wardenrun's locked, zeroed-after-use memory. |
+| 2 | The master password of the dedicated account, plus settings (server address, collection, pinned `bw`) | Read from one macOS keychain item into wardenrun's memory, **before** the question is asked and before any contact with the vault | Not the item: macOS opens it only for programs signed with wardenrun's certificate (tested with a prototype). After the read it lives in wardenrun's locked, zeroed-after-use memory. |
+| 3 | The approval text: the program, its arguments and the parent process | Shown by macOS itself in the Touch ID sheet. At most 400 characters; a longer command is **denied**, never shortened. | No. It is drawn on your screen. Only a yes or a no comes back, from the OS. |
 | 4 | The master password, on its way to `bw` (and, depending on the path, a session key back) | Three paths, best first. **(a) Preferred:** a private socket shared only by wardenrun and one `bw serve` process; neither the password nor a session key is ever in an environment or a command line. **(b) Fallback:** the password through a pipe, then the session key `BW_SESSION` in the environment of each `bw` call. **(c) Last resort:** the password itself in `bw`'s environment. An experiment at the start of the `bw` work chooses the path, and this README will say which one shipped. | (a): no. (b) and (c): yes, with `ps eww`, for a few seconds: the session key (b) or the master password (c). Either one unlocks the whole collection (threat model, row 16). |
 | 5 | `bw` talking to your Vaultwarden server | HTTPS only. The master password itself is not sent: `bw` derives keys from it on your Mac, and Bitwarden's standard login sends only a derived hash. `bw` keeps its login tokens and an encrypted copy of the vault in wardenrun's own profile directory. | The traffic: no. The profile files: yes, they are readable by your user (threat model, row 17). |
 | 6 | The items `bw` lists, as JSON: the whole organization as the dedicated account sees it (`bw` combines its collection and organization filters with OR, so it cannot narrow the list to one collection; that is why the account should only see the one collection). wardenrun picks the item you named, checks it is in the allowed collection, and drops the rest. Then `bw` locks the vault and the password is zeroed. | A pipe from `bw` to wardenrun, into wardenrun's memory only | No |
-| 7 | The secret value, handed to the approved command | `--env`: an environment variable (**visible to `ps eww` while the command runs**). `--stdin`: standard input (not visible). `--file`: a `0600` file in a private temp directory (readable by you while it exists, deleted on exit). | `--stdin`: no. `--env` and `--file`: yes, while the command runs. That is why `--stdin` exists. |
-| 8 | What the command prints, going back to the agent | The command's stdout and stderr go through wardenrun's masker, then on to the agent | Only masked stdout and stderr pass through wardenrun. A command that writes the secret to a file, or encodes it in a way the masker does not recognise, is not caught (threat model, row 8). |
-| 9 | One audit-log line | Appended to a local file | Yes, it is a normal file. It holds names, the command line, hashes, times and your decision, never values. |
+| 7 | The secret value, handed to the approved command | `--env`: an environment variable (**visible to `ps eww` while the command runs**). `--stdin`: standard input (not visible). `--file`: a `0600` file in a fresh `0700` directory inside your per-user temporary folder (readable by you while it exists, deleted when the command ends). The command inherits only standard input, output and error, nothing else that wardenrun had open. | `--stdin`: no. `--env` and `--file`: yes, while the command runs. That is why `--stdin` exists. |
+| 8 | What the command prints, going back to the agent | The command's stdout and stderr go through wardenrun's masker, then on to the agent. Values shorter than 6 characters are not masked (wardenrun says so on stderr). A background process that keeps the output open after the command ends is cut off after 1 second of silence, or 5 seconds in all. | Only masked stdout and stderr pass through wardenrun. A command that writes the secret to a file, or encodes it in a way the masker does not recognise, is not caught (threat model, row 8). |
+| 9 | Two audit-log lines: `approved` (written after your touch and before anything is fetched) and `finished` (exit status and duration) | Appended to a local file | Yes, it is a normal file. Each line holds names, hashes, times and your decision, never a value fetched from the vault. The `approved` line also holds the command line **as the agent typed it**: no secret has been fetched at that moment, so there is nothing to scrub. A secret that the agent itself typed into the command line is therefore in the log; the lines written after the command starts are masked. |
 
-`wardenrun new` follows the same path, with a different payload. The new password only ever
-exists in wardenrun's memory and in pipes between wardenrun and `bw`; the exposures of steps 4
-and 5 above apply to it as well.
+`wardenrun new` follows a similar path, with a different payload. The new password only ever
+exists in wardenrun's memory and in the channel to `bw` (steps 4 and 5 above apply to it as
+well). It is made **after** your touch, never before.
 
 ```text
   you or the agent:   wardenrun new staging-db-admin
       │
       ▼
-  (a) wardenrun generates the password itself, from macOS secure random,
-      in its own memory
-  (b) Touch ID sheet: 'create item "staging-db-admin" in collection <name>,
-      password of 32 characters, never shown'          you approve with a touch
-  (c) master password from the keychain ──▶ bw ──▶ Vaultwarden: unlock,
-      sync, check the name is free  (same path as steps 3 to 6 above)
-  (d) the new item goes to bw as JSON, over a pipe or the private socket, never
-      in a command line ──▶ Vaultwarden (HTTPS)
-  (e) bw answers with the new item, password included, over a pipe;
+  (a) master password + settings from the macOS keychain (as step 2 above);
+      not set up: stop, before any question
+  (b) Touch ID sheet: 'create item "staging-db-admin" in collection <id>;
+      password of 32 characters (letters and digits), never shown (from ...)'
+      you approve with a touch      a no, a timeout, no sensor: stop, exit code 77
+  (c) wardenrun generates the password itself, from macOS secure random,
+      in its own memory (every character equally likely, no modulo bias)
+  (d) master password ──▶ bw ──▶ Vaultwarden: unlock, sync, check that the
+      name is free (same path as steps 4 to 6 above); a name that exists
+      stops the run here, nothing is created
+  (e) the new item goes to bw as JSON, over the channel of step 4, never in a
+      command line ──▶ Vaultwarden (HTTPS)
+  (f) bw answers with the new item, password included, over the same channel;
       wardenrun keeps only the id and zeroes the rest
-  (f) what the caller sees:   created "staging-db-admin" (id ...) in <collection>
+  (g) one audit line "new" (name, no value)
+  (h) what the caller sees:   created "staging-db-admin" (id ...) in <collection id>
       the password is never printed, logged or returned
 ```
 
@@ -239,7 +319,7 @@ Before the first `run`, a human does this once:
    two-step login is not supported yet. wardenrun makes no network call of its own, so it also
    does not check whether Bitwarden has revoked its signing certificate.
 
-From then on the master password travels only as in steps 3 and 4 above.
+From then on the master password travels only as in steps 2 and 4 above.
 
 Changing the settings later is the same command: it shows the old values as the defaults and in
 the approval sheet, and still needs the password typed again.
@@ -292,14 +372,16 @@ dedicated account and the advice below.
 | **`~/.config/wardenrun/state/`**, **`bw.lock`** | Files for the approval limit (one sheet at a time; a short lock-out after repeated refusals: times of recent refusals, no names) and the lock that keeps two wardenruns from using `bw` at once. | Until you delete them. Deleting them also lifts the lock-out: this limit slows a pestering agent, it is not a barrier against one that can delete files. |
 | **`~/.config/wardenrun/bw/`** | wardenrun's *own* `bw` profile: login tokens (**plain text**, mode `0600`; plus the API-key secret if you logged in with one) and, as far as is known, an encrypted copy of the vault and the wrapped vault key. Never your personal `bw` profile. | Until you delete it. An option logs out after every run. |
 | **`~/.config/wardenrun/config.toml`** | Not built yet; nothing reads it. It is reserved for preferences only (approval timeout, redaction text, log path); nothing in it will be able to widen access. | |
-| **`~/Library/Logs/wardenrun/audit.jsonl`** | One line per event: time, event (approved, denied, timeout, error, new, setup), item *name*, command line (any secret masked), program path and hash, working directory, parent processes, protection level, exit status, duration. Lines are hash-chained, which catches accidents and clumsy edits, not a determined rewrite by a process of yours. **Never values.** | Until you delete it |
-| **A temporary file** | Only with `--file`: a `0600` file in a fresh `0700` directory containing the secret | Removed when the command exits, and on signals |
+| **`~/Library/Logs/wardenrun/audit.jsonl`** | One line per event: time, event (`approved`, `denied`, `timeout`, `error`, `new`, `setup`, `finished`), item *name*, command line, program path and hash, working directory, parent processes, protection level, exit status, duration. `approved` is written after your touch and before the vault is contacted; `finished` only if the command really ran. The command line is as the agent typed it in the `approved` line, and masked in the lines written after the command starts. Lines are hash-chained, which catches accidents and clumsy edits, not a determined rewrite by a process of yours. **Never a value from the vault.** | Until you delete it |
+| **A temporary file** | Only with `--file`: a `0600` file named after its variable, in a fresh `0700` folder `wardenrun-XXXXXX` inside your per-user temporary directory (not `$TMPDIR`, which the caller controls), containing the secret | Removed when the command ends, also when it ends because `HUP`, `INT`, `QUIT` or `TERM` was sent to wardenrun (wardenrun passes those on to the command). **Not** removed if wardenrun is killed with `SIGKILL`, loses power, or (in the few milliseconds between writing the file and starting the command) gets `TERM`: the file stays, readable only by you, until you delete it. |
 | **wardenrun's memory** | The master password and the secret, in locked memory, zeroed after use, with core dumps disabled. Copies outside wardenrun's own buffers are not covered: the kernel's pipe and socket buffers, swap, and `bw`'s own memory. | Seconds |
 
 ## How secure is it, honestly
 
-Where this page says *tested*, it means checked with a throwaway prototype on one macOS 15
-machine (see [`docs/DESIGN.md`](docs/DESIGN.md), section 3.1); the real program does not exist yet.
+Where this page says *tested*, it means checked either with a throwaway prototype on one macOS 15
+machine (see [`docs/DESIGN.md`](docs/DESIGN.md), section 3.1) or by the automated tests in this
+repository. No release has been run end to end yet: not against a real Vaultwarden, and not with
+a person touching the sensor.
 
 Short version: wardenrun stops an agent from **quietly** getting a secret. It does not stop you
 from approving something harmful, and it does not defend a Mac that is already compromised.
@@ -346,7 +428,7 @@ What wardenrun does **not** protect you from, in everyday words:
 - **A leaked signing key.** Releases are signed with a self-signed certificate whose private key
   the maintainer holds. If it leaks, an attacker could sign a binary the keychain accepts.
 
-All 18 attacks that were considered, with what happens and why, are in
+All 19 attacks that were considered, with what happens and why, are in
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 ## Compared to what exists
@@ -402,12 +484,23 @@ Secrets: never ask for, print or write secret values. To use one, run
 If wardenrun exits with code 77 the human said no (or did not answer): stop and ask.
 Keep the command short (under 400 characters); put anything longer in a script file.
 Prefer `--stdin <field>` when the tool can read the secret from standard input.
+If wardenrun exits with 1 and a `wardenrun:` message, it failed: report it, do not retry in a loop.
 ```
 
 Things worth knowing:
 
 - **A refusal or a timeout (60 seconds) is exit code 77.** After repeated refusals wardenrun
   also locks itself out for 60 seconds.
+- **An approved run can still fail.** The question comes first and the vault is contacted
+  only after your touch, so a missing item, an empty field or a server that is down shows up
+  afterwards, as exit code 1 and one sentence on stderr that names the item or field, never a
+  value. `wardenrun new` with a name that exists fails the same way, before anything is created.
+- **Signals reach the command.** `Ctrl-C`, `HUP`, `QUIT`, `TERM`, `USR1` and `USR2` sent to
+  wardenrun are passed on to the command (the command stays in wardenrun's process group, so a
+  terminal's `Ctrl-C` reaches it directly too). The temporary file of `--file` is removed when
+  the command ends.
+- **Run it from a logged-in screen session.** Over `ssh` or `cron` there is no place to draw
+  the Touch ID sheet: that is "no approval possible", exit code 77, and nothing is fetched.
 - **Long commands are denied, not shortened.** The macOS sheet silently cuts long text after
   about 510 characters, which would hide the tail of a command. wardenrun budgets 400
   characters and refuses anything longer: put it in a script file.

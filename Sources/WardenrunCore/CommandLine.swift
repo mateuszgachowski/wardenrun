@@ -3,7 +3,7 @@ import Foundation
 public struct FieldBinding: Equatable, Sendable {
     /// The environment variable (or, for `--file`, the variable that will hold the file's path).
     public let name: String
-    /// `password`, `username`, `totp`, `notes`, `uri` or the name of a custom field.
+    /// `password`, `username`, `notes`, `uri` or the name of a custom field (`totp` parses, but `run` refuses it).
     public let field: String
 
     public init(name: String, field: String) {

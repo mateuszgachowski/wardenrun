@@ -17,6 +17,6 @@ public enum Usage {
           Check this installation: signature, hardening, the stored item, bw, Touch ID. Prints no secret.
       wardenrun version | help
 
-    field is password, username, totp, notes, uri, or the name of a custom field.
+    field is password, username, notes, uri, or the name of a custom field (totp is not supported yet).
     """
 }

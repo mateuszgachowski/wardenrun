@@ -191,16 +191,28 @@ wardenrun run <item> [--env VAR=field]... [--file VAR=field]... [--stdin field] 
    that executable, record cwd and the parent chain (`proc_pidpath` up to the terminal).
    Build the approval text (5.3); reject argv containing NUL, and any command that does not
    fit the 400-character budget: a command too long to review is not approved.
-3. **Rate limit**: one pending prompt, cool-down after repeated denials.
-4. **Approval** (5.3). Deny or timeout: audit, exit 77.
-5. **Read the protected item** from the `SecretStore` (master password + pinned settings).
+3. **Read the protected item** from the `SecretStore` (master password + pinned settings).
+   This comes *before* the question, so that a Mac that is not set up fails (exit 1) without
+   asking anyone anything. Nothing is fetched from the vault yet. (Call made during the
+   implementation of `run`; the first draft read the item after the approval. The sheet text
+   does not depend on it.)
+4. **Rate limit**: one pending prompt, cool-down after repeated denials.
+5. **Approval** (5.3). Deny, timeout, no sensor, no screen session, lock-out, or a text over
+   the budget: audit (`denied`, `timeout` or `error`), exit 77, nothing fetched. Approved:
+   audit line `approved` is written now, before anything is fetched.
 6. **Fetch the one item** through `bw` (5.2): unlock, sync, list the allowed collection only,
    pick the exact-name match (exactly one, or fail), lock. The session is discarded
-   immediately and the master password zeroed.
-7. **Spawn the child** with `posix_spawn` using the *same* resolved path and argv that were
-   shown. The environment is the caller's own plus the requested variables. stdout and stderr
-   are pipes through the masker (5.5). Signals are forwarded; the exit status is propagated.
-8. **Clean up** temp files, zero buffers, write the audit line (5.7).
+   immediately and the master password zeroed. The injection plan (5.4) is built from the
+   item and the item's buffers are wiped before the child exists.
+7. **Last look, then spawn the child** with `posix_spawn` using the *same* resolved path and
+   argv that were shown, after the program file was hashed once more (a changed hash starts
+   nothing, exit 1). The environment is the caller's own plus the requested variables; the
+   child inherits only descriptors 0, 1 and 2. stdout and stderr are pipes through the masker
+   (5.5). `HUP`, `INT`, `QUIT`, `TERM`, `USR1` and `USR2` sent to wardenrun are forwarded to
+   the child, which stays in wardenrun's process group; the exit status is propagated (128+n
+   for a signal; 126 and 127 when the command cannot be run or found, as a shell would).
+8. **Clean up** temp files, zero buffers, write the audit line `finished` with the exit
+   status and the duration (5.7).
 
 There is no window between "approved" and "used" in which another process can substitute
 the command line or the request: approval, fetch and exec are the same process and the same
@@ -345,12 +357,16 @@ Driver rules:
 | Mode | How | Exposure |
 |---|---|---|
 | `--env VAR=field` (default) | environment of the child | readable by same-user `ps eww` for the child's lifetime (threat 9) |
-| `--file VAR=field` | file `0600` in a fresh `0700` directory under `$TMPDIR`, path in `VAR`, removed on exit and on signals | readable by the same user while it exists |
+| `--file VAR=field` | file `0600`, named after the (validated) variable, in a fresh `0700` directory `wardenrun-XXXXXX` under the per-user temporary directory (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, not `$TMPDIR`, which the caller controls), path in `VAR`, removed when the child ends (also after a forwarded signal) | readable by the same user while it exists; **left behind** if wardenrun gets `SIGKILL` (or `TERM` in the instants before the child starts) |
 | `--stdin field` | written to the child's stdin pipe, then closed | not visible to `ps`; only works for tools that read secrets from stdin |
 
-`field` is `password`, `username`, `totp`, `notes`, `uri`, or the name of a custom field.
-With no flags, custom fields named `env:VAR` on the item are injected as `VAR` (so the item
-itself says which variables it provides). These conventions are design calls.
+`field` is `password`, `username`, `notes`, `uri`, or the name of a custom field. `totp` parses
+but is refused: the vault holds the seed, not a code, and handing out the seed would be a
+different feature. A field that is missing or empty is an error (never an empty variable); a
+value containing a NUL byte cannot be an environment variable and is accepted only by `--stdin`
+and `--file`. With no flags, custom fields named `env:VAR` on the item are injected as `VAR`
+(so the item itself says which variables it provides); with any flag, only what the flags ask
+for is injected. These conventions are design calls.
 
 ### 5.5 Masking
 
@@ -369,32 +385,43 @@ is a later feature. Masking is an **accident guard**, not an exfiltration barrie
 wardenrun new <name> [--username U] [--uri URL] [--env VAR] [--length 32] [--charset alnum|full]
 ```
 
-1. Validate the name (no control characters, at most 100 chars). Generate the password **inside
+1. Validate the name (no control characters, at most 100 chars). Read the protected item
+   (as in 5.1 step 3). The password is generated **after** the approval (step 2), **inside
    wardenrun** with `SecRandomCopyBytes` and rejection sampling (not `bw generate`: no extra
    process, no extra 3 s). Length 16–128, default 32. `alnum` (default) works everywhere;
-   `full` adds symbols except quotes, backslash, backtick, `$` and whitespace.
-2. **Approval** dialog: "Create item `<name>` in collection `<C>`; password of N characters,
-   never shown".
-3. Same `bw` session as `run`: `unlock` → `sync` → `list` (refuse if the name already exists)
-   → `create item` → `lock`. The item JSON is built in memory, base64-encoded by wardenrun
-   and written to `bw create item`'s **stdin** (the CLI reads base64 JSON from stdin when no
-   argument is given), so nothing secret is in an argv. The response contains the full item
-   including the password: it is read from the pipe, only `id` is kept, the rest is zeroed.
+   `full` adds symbols except quotes, backslash, backtick, `$` and whitespace
+   (`!#%&()*+,-./:;<=>?@[]^_{|}~`).
+2. **Approval** dialog: `create item "<name>" in collection <C>; [username "…"; uri "…";
+   stored as env:VAR;] password of N characters (letters and digits), never shown (from
+   <parent>) [end]`, escaped and within the same 400-character budget as `run`.
+3. Same `bw` session as `run` (5.2): `unlock` → `sync` → `list` (refuse if the name already
+   exists) → create → `lock`. The item JSON is built in memory in a locked buffer and sent as
+   the body of `POST /object/item` to `bw serve`, so nothing secret is in an argv. The response
+   contains the full item including the password: it is read from the channel, only `id` is
+   kept, the rest is zeroed.
 4. Item shape: type 1, `organizationId` and `collectionIds: [C]`, `folderId: null`,
    `login.username`/`uris`, and the password in `login.password`; with `--env VAR` it is
    stored instead as a hidden custom field (`type: 1`) named `env:VAR` (5.4).
    The organization-collection create path in the SDK was not verified in research: the
    Vaultwarden integration test must cover it.
-5. Output is one line: `created "<name>" (id ...) in <collection>`. Never the value.
-6. Audit event `new`. *Later idea, not v1:* `new --then -- cmd` generates, injects into `cmd`
+5. Output is one line: `created "<name>" (id ...) in <collection id>`. Never the value.
+6. Audit event `new` (there is no separate `approved` line for `new`; a refusal or a failure
+   is `denied`, `timeout` or `error`). *Later idea, not v1:* `new --then -- cmd` generates, injects into `cmd`
    and stores only if `cmd` succeeds, so the target service and the vault cannot drift apart.
 
 ### 5.7 Audit log
 
 `~/Library/Logs/wardenrun/audit.jsonl`, mode `0600`, append-only (`O_APPEND`), one JSON
-object per line: time, event (`approved`, `denied`, `timeout`, `error`, `new`, `setup`),
-item name, command line (with any secret value masked), resolved executable + hash, cwd,
-parent chain, tier, exit status, duration. **Never values.** Each line carries the SHA-256
+object per line: time, event (`approved`, `denied`, `timeout`, `error`, `new`, `setup`,
+`finished`), item name, command line, resolved executable + hash, cwd, parent chain, tier,
+exit status, duration. **Never values from the vault.** `approved` is written after the touch
+and before the vault is contacted, so it holds the command line as the agent typed it: no
+secret exists yet to mask, and a secret the agent typed into the command line itself is
+therefore in the log. Lines written after the command starts have the injected values
+masked. `finished` (exit status and duration, no command line) is written only when the
+command really ran, which tells a command's own exit 77 from a refusal. If the log cannot be
+written wardenrun warns on stderr and carries on (a full disk must not stop work: the
+approval has already happened). Each line carries the SHA-256
 of the previous line, so accidental damage and clumsy edits or deletions in the middle are
 detectable. It is not tamper-proof: the hash has no key, so a process of the same user that
 knows the format can rewrite lines and recompute the chain, drop the last lines, or delete
@@ -465,6 +492,7 @@ profile on disk.
 | 16 | While one approved run is in flight, read the master password or `BW_SESSION` from `bw`'s environment (`ps eww`; `bw` is not an Apple platform binary) and use `BW_SESSION` + `data.json` to decrypt the **whole cached collection** offline | **Not protected on rungs b and c** of 5.2.6: one approval can leak every item the dedicated account sees. Window of a few seconds, and it needs an agent polling `ps` at that moment. | Rung a (`bw serve` on a socketpair) removes both secrets from env and argv. The dedicated account bounds the damage to its one collection. This is the main reason PR3 starts with a spike. |
 | 17 | Read the access/refresh tokens (or API-key secret) from wardenrun's `bw` profile (`data.json`, mode `0600`, same user) and call the Vaultwarden API as the dedicated account | **Not protected.** Can read the encrypted vault (offline guessing of a strong master password is the next step), and delete or alter items the account may write. | Dedicated account; long random master password; Argon2id; read-only collection permission when `new` is not used; `logout_after_run`; password login instead of API key (no long-lived secret on disk) |
 | 18 | The maintainer's signing key leaks, or a malicious release is published | **Not protected for users who installed that release.** A binary signed with the leaked key passes the keychain ACL and could read the stored item after one approval. | Key only in a CI secret plus one offline backup; releases carry a GitHub Artifact Attestation and published hashes; certificate rotation procedure (everyone re-runs `setup`); `SECURITY.md` for reporting. Same trust anchor as any package maintainer. |
+| 19 | The agent kills wardenrun with `kill -9` while a run is in progress | **Not protected, limited.** Catchable signals (`HUP`, `INT`, `QUIT`, `TERM`) end a run cleanly; `SIGKILL` cannot be caught, so a `--file` secret stays on disk and a `bw serve` that was already unlocked may keep running with no one holding its end of the private socket (to be checked by the integration tests, spike Q5). The agent learns no new secret from this; the window of an exposure that the approval already allowed gets longer. | Files are `0600` in a `0700` folder; the stale-process cleanup idea (pid file beside `bw.lock`, kill a stale group at the next acquire) is recorded and not built. |
 
 **Out of scope:** root or malware on the machine; a user who approves without reading;
 a physically stolen unlocked Mac; the security of Vaultwarden/`bw` themselves.
