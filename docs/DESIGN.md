@@ -502,13 +502,13 @@ polkit-gated root helper or a TPM-sealed credential; this needs its own design.
 
 ## 11. Open decisions and design calls
 
-**Open decision** (to be resolved by the maintainer before the first release)
+**Decided by the maintainer**
 
 1. **Signing-key custody (the price of not paying Apple).** Every release is signed with a
-   self-signed certificate whose private key the maintainer must keep: a CI secret plus one
+   self-signed certificate whose private key the maintainer keeps: a CI secret plus one
    offline backup in the maintainer's own password manager. Losing it means a new
-   certificate and everyone re-running `setup`; leaking it is threat 18. This has to be
-   accepted before the first release. (Apple Developer Program: declined by the maintainer on
+   certificate and everyone re-running `setup`; leaking it is threat 18. Accepted by the
+   maintainer on 2026-10-20. (Apple Developer Program: declined by the maintainer on
    2026-10-18.)
 
 **Design calls** (open to review)
