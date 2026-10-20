@@ -73,6 +73,19 @@ status=0
 [ "$status" -eq 78 ] || { echo "ci: unhardened release build: run exited $status, expected 78" >&2; exit 1; }
 rm -rf "$unsigned_dir"
 
+# Nothing is set up on a runner: run and new say so and ask nothing (1); without a window-server
+# session they stop earlier (78).
+for words in "run item -- true" "new item"; do
+    status=0
+    message="$("$binary" $words </dev/null 2>&1)" || status=$?
+    if printf '%s\n' "$output" | grep -Eq '^ok +graphic-session '; then
+        [ "$status" -eq 1 ] || { echo "ci: '$words' exited $status, expected 1 (not set up)" >&2; exit 1; }
+        printf '%s\n' "$message" | grep -q 'not set up' || { echo "ci: '$words' did not say it is not set up: $message" >&2; exit 1; }
+    else
+        [ "$status" -eq 78 ] || { echo "ci: '$words' exited $status, expected 78 without a graphic session" >&2; exit 1; }
+    fi
+done
+
 # A usage error is 64, help and version work.
 status=0
 "$binary" run </dev/null >/dev/null 2>&1 || status=$?

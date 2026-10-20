@@ -56,7 +56,7 @@ public enum NewFlow {
 
         let text: String
         do {
-            text = try approvalText(options, collection: collection, parent: context.parentChain.first)
+            text = try approvalText(options, collection: collection, parent: ParentDescription.pick(context.parentChain))
         } catch let error as ApprovalTextError {
             if case .tooLong(let count) = error {
                 steps.warn("the request is too long to review (\(count) > \(ApprovalTextBuilder.budget)); use a shorter name")

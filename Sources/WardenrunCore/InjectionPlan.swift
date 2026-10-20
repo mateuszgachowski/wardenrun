@@ -11,6 +11,8 @@ public enum RunError: Error, Equatable, Sendable {
     case tempFile
     /// A value with a NUL byte cannot be an environment variable (the C string would end early).
     case nulInEnvironmentValue(String)
+    /// HUP, INT or TERM arrived before the command started; nothing was started.
+    case interrupted
 
     public var message: String {
         switch self {
@@ -25,6 +27,8 @@ public enum RunError: Error, Equatable, Sendable {
                 + "(ASCII letters, digits and _, not starting with a digit, and not DYLD_ or LD_)"
         case .tempFile:
             return "a private temporary file for --file could not be written"
+        case .interrupted:
+            return "interrupted before the command started; nothing was started"
         case .nulInEnvironmentValue(let name):
             return "the value for \(TextEscaping.escape(name)) contains a NUL byte and cannot be an environment variable; use --stdin or --file"
         }
@@ -133,7 +137,7 @@ public final class SecretFiles: @unchecked Sendable {
         guard directory == nil else { throw RunError.tempFile }
         var template = Array((parent + "/wardenrun-XXXXXX").utf8CString)
         guard mkdtemp(&template) != nil else { throw RunError.tempFile }
-        let base = String(cString: template)
+        let base = String(decoding: template.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
         directory = base
 
         var paths: [String: String] = [:]

@@ -174,7 +174,7 @@ struct NewFlowTests {
         #expect(text.contains("stored as env:DEPLOY_TOKEN"))
         #expect(text.contains("password of 48 characters"))
         #expect(text.contains("never shown"))
-        #expect(text.contains("(from zsh)"))
+        #expect(text.contains("(from Terminal)"))
         #expect(text.hasSuffix("[end]"))
         #expect(!text.contains(rig.password))
     }

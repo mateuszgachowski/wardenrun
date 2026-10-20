@@ -4,9 +4,10 @@ import WardenrunCore
 #if canImport(Darwin)
 import WardenrunMac
 
-// Exit codes: 0 done, 1 doctor found a failure or setup failed, 64 bad command line or no terminal,
-// 70 not implemented yet,
-// 77 not approved (run/new), 78 refused to start in an unsafe state.
+// Exit codes: 0 done, 1 doctor found a failure or setup/run/new failed, 64 bad command line or no
+// terminal, 77 not approved (run/new), 78 refused to start in an unsafe state, 126 and 127 the
+// command could not be run / was not found; `run` otherwise returns the command's own status
+// (128 plus the signal number when it was killed).
 
 func say(_ text: String) { FileHandle.standardOutput.write(Data((text + "\n").utf8)) }
 func complain(_ text: String) { FileHandle.standardError.write(Data(("wardenrun: " + text + "\n").utf8)) }
@@ -72,10 +73,16 @@ case .setup(let options):
     exit(SetupCommand.run(options: options, environment: environment, paths: WardenrunPaths(home: homeDirectory()),
                           store: KeychainAclStore(), output: say,
                           errorOutput: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }))
-case .run, .new:
+case .run(let options):
     refuseUnlessSafe()
-    complain("this command is not implemented yet")
-    exit(70)
+    exit(RunCommand.run(options: options, environment: environment, paths: WardenrunPaths(home: homeDirectory()),
+                        store: KeychainAclStore(),
+                        errorOutput: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }))
+case .new(let options):
+    refuseUnlessSafe()
+    exit(NewCommand.run(options: options, environment: environment, paths: WardenrunPaths(home: homeDirectory()),
+                        store: KeychainAclStore(), output: say,
+                        errorOutput: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }))
 }
 #else
 FileHandle.standardError.write(Data("wardenrun runs on macOS only\n".utf8))

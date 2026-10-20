@@ -275,7 +275,7 @@ struct RunFlowTests {
             #expect(text.contains("[writable exe]"))
             #expect(text.contains("[exe changed]"))
             #expect(text.contains("use secret \"it-github\" to run: /usr/local/bin/tool --flag arg"))
-            #expect(text.contains("(from zsh)"))
+            #expect(text.contains("(from Terminal)"), "the shell between is skipped")
         }
     }
 

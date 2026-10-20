@@ -113,7 +113,7 @@ public enum RunFlow {
         defer { config.masterPassword.wipe() }
 
         // The question.
-        let request = ApprovalRequest(item: options.item, executable: executable, parent: context.parentChain.first,
+        let request = ApprovalRequest(item: options.item, executable: executable, parent: ParentDescription.pick(context.parentChain),
                                       callerEnvironment: context.callerEnvironment,
                                       executableIsWritable: context.executableIsWritable(executable.path),
                                       previousHash: steps.previousHash(options.item, executable.path))
