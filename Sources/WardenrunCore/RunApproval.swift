@@ -54,12 +54,12 @@ public enum ApprovalTextBuilder {
         if networkTools.contains(name) { tags.append("[network]") }
         if envDumpTools.contains(name) { tags.append("[env dump]") }
         if [executable.path, executable.argv.first ?? "", request.item].contains(where: hasNonASCII) { tags.append("[non-ASCII]") }
-        for variable in EnvPolicy.riskyVariables(in: request.callerEnvironment) { tags.append("[env: \(escape(variable))]") }
+        for variable in EnvPolicy.riskyVariables(in: request.callerEnvironment) { tags.append("[env: \(TextEscaping.escape(variable))]") }
 
         var parts = tags
-        parts.append("use secret \"\(escape(request.item, quoting: true))\" to run: \(quoteArgument(executable.path))")
+        parts.append("use secret \"\(TextEscaping.escape(request.item, quoting: true))\" to run: \(quoteArgument(executable.path))")
         for argument in arguments { parts.append(quoteArgument(argument)) }
-        if let parent = request.parent { parts.append("(from \(escape(parent)))") }
+        if let parent = request.parent { parts.append("(from \(TextEscaping.escape(parent)))") }
         parts.append("[end]")
 
         let result = parts.joined(separator: " ")
@@ -88,41 +88,11 @@ public enum ApprovalTextBuilder {
 
     private static func hasNonASCII(_ text: String) -> Bool { text.unicodeScalars.contains { $0.value > 0x7E } }
 
-    // MARK: escaping
-
-    /// Control, format (bidi, zero-width), separator and C1 scalars become visible escapes, a
-    /// backslash is doubled so that escapes stay unambiguous, and, with `quoting`, a double quote
-    /// is escaped too.
-    static func escape(_ text: String, quoting: Bool = false) -> String {
-        var output = ""
-        for scalar in text.unicodeScalars {
-            switch scalar {
-            case "\n": output += "\\n"
-            case "\r": output += "\\r"
-            case "\t": output += "\\t"
-            case "\\": output += "\\\\"
-            case "\"" where quoting: output += "\\\""
-            default:
-                let value = scalar.value
-                let category = scalar.properties.generalCategory
-                let invisible = value < 0x20 || value == 0x7F || (0x80...0x9F).contains(value)
-                    || category == .format || category == .lineSeparator || category == .paragraphSeparator
-                    || category == .unassigned || category == .privateUse || category == .surrogate
-                if invisible {
-                    output += "\\u{" + String(value, radix: 16, uppercase: true) + "}"
-                } else {
-                    output.unicodeScalars.append(scalar)
-                }
-            }
-        }
-        return output
-    }
-
     private static let safeBytes: Set<UInt8> = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@%+=:,./-".utf8)
 
     /// Bare when it is plain, otherwise in single quotes the way a shell would need it.
     private static func quoteArgument(_ argument: String) -> String {
         if !argument.isEmpty, argument.utf8.allSatisfy({ safeBytes.contains($0) }) { return argument }
-        return "'" + escape(argument).replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "'" + TextEscaping.escape(argument).replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
