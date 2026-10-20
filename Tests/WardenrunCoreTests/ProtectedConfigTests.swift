@@ -15,7 +15,7 @@ struct ProtectedConfigTests {
             "organization_id": "org-1",
             "collection_ids": ["col-1", "col-2"],
             "master_password": Self.password,
-            "bw_pin": ["kind": "signed_release", "team_id": "LTZ2PFU5D6"],
+            "bw_pin": ["kind": "signed_release", "team_id": "LTZ2PFU5D6", "path": "/opt/wardenrun/bw"],
         ]
         change(&object)
         return try JSONSerialization.data(withJSONObject: object)
@@ -34,17 +34,13 @@ struct ProtectedConfigTests {
         #expect(config.organizationID == "org-1")
         #expect(config.collectionIDs == ["col-1", "col-2"])
         #expect(passwordText(config) == Self.password)
-        #expect(config.bwPin == .signedRelease(teamID: "LTZ2PFU5D6"))
+        #expect(config.bwPin == .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"))
         #expect(config.nodeExtraCACerts == nil)
         #expect(config.httpsProxy == nil)
     }
 
-    @Test func roundTripKeepsEveryFieldForBothPinKinds() throws {
-        let pins: [BwPin] = [
-            .signedRelease(teamID: "LTZ2PFU5D6"),
-            .nodeScript(nodePath: "/opt/node/bin/node", nodeSHA256: Self.hash,
-                        scriptPath: "/opt/bw/bw.js", scriptSHA256: String(repeating: "cd", count: 32)),
-        ]
+    @Test func roundTripKeepsEveryField() throws {
+        let pins: [BwPin] = [.signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw")]
         for pin in pins {
             let original = try ProtectedConfig(
                 serverURL: try #require(URL(string: "https://vault.example")), accountEmail: "a@b.example",
@@ -104,7 +100,7 @@ struct ProtectedConfigTests {
             let url = try #require(URL(string: text))
             #expect(throws: (any Error).self) {
                 try ProtectedConfig(serverURL: url, accountEmail: "a@b.example", organizationID: "o", collectionIDs: ["c"],
-                                    masterPassword: SecretBuffer(copying: [1, 2, 3]), bwPin: .signedRelease(teamID: "LTZ2PFU5D6"))
+                                    masterPassword: SecretBuffer(copying: [1, 2, 3]), bwPin: .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"))
             }
         }
     }
@@ -126,30 +122,34 @@ struct ProtectedConfigTests {
     @Test(arguments: ["", "ltz2pfu5d6", "LTZ2PFU5D", "LTZ2PFU5D6X", "x\" or anchor apple", "LTZ2PFU5D!"])
     func theTeamIDMustBeTenUppercaseLettersOrDigits(team: String) {
         #expect(throws: ConfigError.invalidValue("team_id")) {
-            try ProtectedConfig.decode(from: blob { $0["bw_pin"] = ["kind": "signed_release", "team_id": team] })
+            try ProtectedConfig.decode(from: blob { $0["bw_pin"] = ["kind": "signed_release", "team_id": team, "path": "/opt/wardenrun/bw"] })
         }
     }
 
-    @Test func pinnedPathsMustBeAbsolute() {
-        for (key, other) in [("node_path", "script_path"), ("script_path", "node_path")] {
-            for bad in ["node", "./node", "", "~/bin/node"] {
-                #expect(throws: ConfigError.invalidValue(key)) {
-                    try ProtectedConfig.decode(from: blob {
-                        $0["bw_pin"] = ["kind": "node_script", key: bad, other: "/ok/path",
-                                        "node_sha256": Self.hash, "script_sha256": Self.hash]
-                    })
-                }
+    @Test func theSignedReleasePathMustBeAbsolute() {
+        for bad in ["bw", "./bw", "", "~/bin/bw"] {
+            #expect(throws: ConfigError.invalidValue("path"), "\(bad)") {
+                try ProtectedConfig.decode(from: blob {
+                    $0["bw_pin"] = ["kind": "signed_release", "team_id": "LTZ2PFU5D6", "path": bad]
+                })
             }
         }
     }
 
-    @Test func upperCaseHashesAreAcceptedAndStoredInLowerCase() throws {
-        let upper = String(repeating: "AB", count: 32)
-        let config = try ProtectedConfig.decode(from: blob {
-            $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": upper,
-                            "script_path": "/s", "script_sha256": upper]
-        })
-        #expect(config.bwPin == .nodeScript(nodePath: "/n", nodeSHA256: Self.hash, scriptPath: "/s", scriptSHA256: Self.hash))
+    @Test func aSignedReleasePinWithoutAPathIsMalformed() {
+        #expect(throws: ConfigError.malformed) {
+            try ProtectedConfig.decode(from: blob { $0["bw_pin"] = ["kind": "signed_release", "team_id": "LTZ2PFU5D6"] })
+        }
+    }
+
+    @Test func theNodeBuildOfBwIsNotAcceptedAsAPin() {
+        // `bw.js` loads node_modules, chunk files and wasm that no hash of `node` + `bw.js` covers.
+        #expect(throws: ConfigError.malformed) {
+            try ProtectedConfig.decode(from: blob {
+                $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": Self.hash,
+                                "script_path": "/s", "script_sha256": Self.hash]
+            })
+        }
     }
 
     @Test func aMasterPasswordThatIsNotUTF8IsRejectedInsteadOfSilentlyChanged() throws {
@@ -157,7 +157,7 @@ struct ProtectedConfigTests {
         #expect(throws: ConfigError.invalidValue("master_password")) {
             try ProtectedConfig(serverURL: url, accountEmail: "a@b.example", organizationID: "o", collectionIDs: ["c"],
                                 masterPassword: SecretBuffer(copying: [0x61, 0xFF, 0x62, 0x63]),
-                                bwPin: .signedRelease(teamID: "LTZ2PFU5D6"))
+                                bwPin: .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"))
         }
     }
 
@@ -174,23 +174,6 @@ struct ProtectedConfigTests {
     @Test func rejectsEmptyCollectionsAndAnEmptyPassword() {
         #expect(throws: ConfigError.emptyCollections) { try ProtectedConfig.decode(from: blob { $0["collection_ids"] = [String]() }) }
         #expect(throws: ConfigError.missingField("master_password")) { try ProtectedConfig.decode(from: blob { $0["master_password"] = "" }) }
-    }
-
-    @Test func rejectsPinnedHashesThatAreNotSHA256Hex() {
-        for bad in ["abc", String(repeating: "g", count: 64), String(repeating: "ab", count: 33)] {
-            #expect(throws: ConfigError.invalidHash("node_sha256")) {
-                try ProtectedConfig.decode(from: blob {
-                    $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": bad,
-                                    "script_path": "/s", "script_sha256": Self.hash]
-                })
-            }
-            #expect(throws: ConfigError.invalidHash("script_sha256")) {
-                try ProtectedConfig.decode(from: blob {
-                    $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": Self.hash,
-                                    "script_path": "/s", "script_sha256": bad]
-                })
-            }
-        }
     }
 
     @Test func rejectsGarbage() {
