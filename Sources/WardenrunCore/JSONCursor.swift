@@ -328,7 +328,9 @@ public struct JSONCursor {
                 position += 1
                 continue
             }
-            let length = try utf8Length(at: position)
+            guard let length = UTF8Check.sequenceLength(in: base!, count: count, at: position) else {
+                throw failure(at: position)
+            }
             for offset in 0..<length { put(base![position + offset]) }
             position += length
         }
@@ -364,29 +366,5 @@ public struct JSONCursor {
             put(UInt8(0xF0 | scalar >> 18)); put(UInt8(0x80 | scalar >> 12 & 0x3F))
             put(UInt8(0x80 | scalar >> 6 & 0x3F)); put(UInt8(0x80 | scalar & 0x3F))
         }
-    }
-
-    /// Length of the well-formed UTF-8 sequence that starts at `start` (a lead byte >= 0x80);
-    /// overlong forms, encoded surrogates and values above U+10FFFF are refused.
-    private func utf8Length(at start: Int) throws -> Int {
-        let lead = base![start]
-        let length: Int
-        var low: UInt8 = 0x80, high: UInt8 = 0xBF
-        switch lead {
-        case 0xC2...0xDF: length = 2
-        case 0xE0: length = 3; low = 0xA0
-        case 0xE1...0xEC, 0xEE, 0xEF: length = 3
-        case 0xED: length = 3; high = 0x9F
-        case 0xF0: length = 4; low = 0x90
-        case 0xF1...0xF3: length = 4
-        case 0xF4: length = 4; high = 0x8F
-        default: throw failure(at: start)
-        }
-        guard start + length <= count else { throw failure(at: count) }
-        guard base![start + 1] >= low, base![start + 1] <= high else { throw failure(at: start + 1) }
-        for offset in 2..<length {
-            guard base![start + offset] >= 0x80, base![start + offset] <= 0xBF else { throw failure(at: start + offset) }
-        }
-        return length
     }
 }
