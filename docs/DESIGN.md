@@ -232,10 +232,12 @@ marked *tested* or *inferred*):
 
 Driver rules:
 
-1. **Pinned binary.** Preferred: the signed GitHub-release `bw`, checked on every run
-   against a code requirement on team `LTZ2PFU5D6`. Also accepted: Homebrew's Node build,
-   pinned as absolute paths of `node` and the script plus SHA-256 (trust on first use at
-   `setup`). Anything else is refused. The pin lives in the protected item (5.8).
+1. **Pinned binary.** Preferred: the signed GitHub-release `bw`, pinned by its absolute path
+   (a regular file, not a symlink) and checked on every run against a code requirement on team
+   `LTZ2PFU5D6`. Also accepted: Homebrew's Node build, pinned as absolute paths of `node` and
+   the script plus SHA-256 (trust on first use at `setup`). Anything else is refused. The pin
+   lives in the protected item (5.8). The check is made once, just before the spawn; it narrows
+   the swap window for a file the user can write, it does not close it (see 5.1).
 2. **Allowlisted environment, nothing inherited:** `HOME`, `LANG`,
    `BITWARDENCLI_APPDATA_DIR` (wardenrun's own dir), `BW_NOINTERACTION=true`, a `PATH`
    containing only the pinned directories, and `NODE_EXTRA_CA_CERTS`/`https_proxy` only
@@ -382,7 +384,8 @@ later hardening.
 - `~/.config/wardenrun/bw/`: wardenrun's **own** `BITWARDENCLI_APPDATA_DIR`, so it never
   touches or depends on the user's personal `bw` session.
 - **In the protected keychain item** (JSON blob): server URL, account e-mail, organization
-  and allowed collection IDs, the master password, and the pinned `bw`/`node` identity.
+  and allowed collection IDs, the master password, and the pinned `bw`/`node` identity (team
+  ID and absolute path, or `node` and script paths with their SHA-256).
   Changing any of it goes through `wardenrun setup`, which needs the master password typed by
   a human at a TTY plus an approval dialog that shows old and new values (threat 15).
 - `wardenrun doctor`: prints tier, signature flags, hardening status, `bw` pin status,

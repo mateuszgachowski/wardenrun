@@ -15,7 +15,7 @@ struct ProtectedConfigTests {
             "organization_id": "org-1",
             "collection_ids": ["col-1", "col-2"],
             "master_password": Self.password,
-            "bw_pin": ["kind": "signed_release", "team_id": "LTZ2PFU5D6"],
+            "bw_pin": ["kind": "signed_release", "team_id": "LTZ2PFU5D6", "path": "/opt/wardenrun/bw"],
         ]
         change(&object)
         return try JSONSerialization.data(withJSONObject: object)
@@ -34,14 +34,14 @@ struct ProtectedConfigTests {
         #expect(config.organizationID == "org-1")
         #expect(config.collectionIDs == ["col-1", "col-2"])
         #expect(passwordText(config) == Self.password)
-        #expect(config.bwPin == .signedRelease(teamID: "LTZ2PFU5D6"))
+        #expect(config.bwPin == .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"))
         #expect(config.nodeExtraCACerts == nil)
         #expect(config.httpsProxy == nil)
     }
 
     @Test func roundTripKeepsEveryFieldForBothPinKinds() throws {
         let pins: [BwPin] = [
-            .signedRelease(teamID: "LTZ2PFU5D6"),
+            .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"),
             .nodeScript(nodePath: "/opt/node/bin/node", nodeSHA256: Self.hash,
                         scriptPath: "/opt/bw/bw.js", scriptSHA256: String(repeating: "cd", count: 32)),
         ]
@@ -104,7 +104,7 @@ struct ProtectedConfigTests {
             let url = try #require(URL(string: text))
             #expect(throws: (any Error).self) {
                 try ProtectedConfig(serverURL: url, accountEmail: "a@b.example", organizationID: "o", collectionIDs: ["c"],
-                                    masterPassword: SecretBuffer(copying: [1, 2, 3]), bwPin: .signedRelease(teamID: "LTZ2PFU5D6"))
+                                    masterPassword: SecretBuffer(copying: [1, 2, 3]), bwPin: .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"))
             }
         }
     }
@@ -126,7 +126,23 @@ struct ProtectedConfigTests {
     @Test(arguments: ["", "ltz2pfu5d6", "LTZ2PFU5D", "LTZ2PFU5D6X", "x\" or anchor apple", "LTZ2PFU5D!"])
     func theTeamIDMustBeTenUppercaseLettersOrDigits(team: String) {
         #expect(throws: ConfigError.invalidValue("team_id")) {
-            try ProtectedConfig.decode(from: blob { $0["bw_pin"] = ["kind": "signed_release", "team_id": team] })
+            try ProtectedConfig.decode(from: blob { $0["bw_pin"] = ["kind": "signed_release", "team_id": team, "path": "/opt/wardenrun/bw"] })
+        }
+    }
+
+    @Test func theSignedReleasePathMustBeAbsolute() {
+        for bad in ["bw", "./bw", "", "~/bin/bw"] {
+            #expect(throws: ConfigError.invalidValue("path"), "\(bad)") {
+                try ProtectedConfig.decode(from: blob {
+                    $0["bw_pin"] = ["kind": "signed_release", "team_id": "LTZ2PFU5D6", "path": bad]
+                })
+            }
+        }
+    }
+
+    @Test func aSignedReleasePinWithoutAPathIsMalformed() {
+        #expect(throws: ConfigError.malformed) {
+            try ProtectedConfig.decode(from: blob { $0["bw_pin"] = ["kind": "signed_release", "team_id": "LTZ2PFU5D6"] })
         }
     }
 
@@ -157,7 +173,7 @@ struct ProtectedConfigTests {
         #expect(throws: ConfigError.invalidValue("master_password")) {
             try ProtectedConfig(serverURL: url, accountEmail: "a@b.example", organizationID: "o", collectionIDs: ["c"],
                                 masterPassword: SecretBuffer(copying: [0x61, 0xFF, 0x62, 0x63]),
-                                bwPin: .signedRelease(teamID: "LTZ2PFU5D6"))
+                                bwPin: .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"))
         }
     }
 

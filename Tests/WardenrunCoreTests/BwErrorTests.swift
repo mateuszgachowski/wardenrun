@@ -5,7 +5,7 @@ struct BwErrorTests {
     private let everyCase: [BwError] = [
         .itemNotFound, .ambiguous(count: 2), .alreadyExists,
         .unsupportedField("totp"), .binaryNotAllowed(reason: "symlink"),
-        .signatureMismatch, .lockBusy, .cancelled, .outputTooLarge, .notLoggedIn,
+        .signatureMismatch, .lockBusy, .stateUnavailable(reason: "no lock file"), .cancelled, .outputTooLarge, .notLoggedIn,
         .spawnFailed(errno: 2), .timeout(phase: "unlock"), .protocolError("no content-length"),
         .unlockFailed(message: "Invalid master password."), .serverError(status: 500),
         .invalidUTF8(field: "password"),
@@ -34,7 +34,7 @@ struct BwErrorTests {
                 payloadCount += inner.displayStyle == .tuple ? inner.children.count : 1
             }
         }
-        #expect(payloadCount == 9)   // the nine cases that carry a payload
+        #expect(payloadCount == 10)   // the ten cases that carry a payload
     }
 
     @Test func errorsAreEquatable() {

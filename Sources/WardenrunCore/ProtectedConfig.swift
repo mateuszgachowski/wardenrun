@@ -2,14 +2,16 @@ import Foundation
 
 /// How wardenrun recognises the `bw` it is allowed to run (DESIGN 5.2, rule 1).
 public enum BwPin: Codable, Equatable, Sendable {
-    /// The signed GitHub-release binary, checked against a code requirement on this team.
-    case signedRelease(teamID: String)
+    /// The signed GitHub-release binary at this absolute path, checked against a code
+    /// requirement on this team before every run.
+    case signedRelease(teamID: String, path: String)
     /// Homebrew's Node build: absolute paths of `node` and the script, with their SHA-256.
     case nodeScript(nodePath: String, nodeSHA256: String, scriptPath: String, scriptSHA256: String)
 
     private enum Keys: String, CodingKey {
         case kind
         case teamID = "team_id"
+        case path
         case nodePath = "node_path"
         case nodeSHA256 = "node_sha256"
         case scriptPath = "script_path"
@@ -20,7 +22,8 @@ public enum BwPin: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: Keys.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "signed_release":
-            self = .signedRelease(teamID: try c.decode(String.self, forKey: .teamID))
+            self = .signedRelease(teamID: try c.decode(String.self, forKey: .teamID),
+                                  path: try c.decode(String.self, forKey: .path))
         case "node_script":
             self = .nodeScript(nodePath: try c.decode(String.self, forKey: .nodePath),
                                nodeSHA256: try c.decode(String.self, forKey: .nodeSHA256),
@@ -34,9 +37,10 @@ public enum BwPin: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: Keys.self)
         switch self {
-        case .signedRelease(let teamID):
+        case .signedRelease(let teamID, let path):
             try c.encode("signed_release", forKey: .kind)
             try c.encode(teamID, forKey: .teamID)
+            try c.encode(path, forKey: .path)
         case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
             try c.encode("node_script", forKey: .kind)
             try c.encode(nodePath, forKey: .nodePath)
@@ -93,9 +97,10 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
         }
         let checkedPin: BwPin
         switch bwPin {
-        case .signedRelease(let teamID):
+        case .signedRelease(let teamID, let path):
             // Later code builds a code requirement from this string, so its shape is fixed here.
             guard Self.isTeamID(teamID) else { throw ConfigError.invalidValue("team_id") }
+            guard Self.isAbsolutePath(path) else { throw ConfigError.invalidValue("path") }
             checkedPin = bwPin
         case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
             guard Self.isAbsolutePath(nodePath) else { throw ConfigError.invalidValue("node_path") }

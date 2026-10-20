@@ -98,24 +98,13 @@ public enum ExecResolver {
         "/" + path.split(separator: "/", omittingEmptySubsequences: true).filter { $0 != "." }.joined(separator: "/")
     }
 
-    private static func realPath(_ path: String) -> String? {
+    static func realPath(_ path: String) -> String? {
         guard let resolved = realpath(path, nil) else { return nil }
         defer { free(resolved) }
         return String(cString: resolved)
     }
 
     private static func hashFile(at path: String) throws -> String {
-        let descriptor = open(path, O_RDONLY)
-        guard descriptor >= 0 else { throw ExecError.notFound(path) }
-        defer { close(descriptor) }
-        var hasher = SHA256()
-        var block = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let count = read(descriptor, &block, block.count)
-            if count < 0 { throw ExecError.notFound(path) }
-            if count == 0 { break }
-            block.withUnsafeBytes { hasher.update(UnsafeRawBufferPointer(rebasing: $0[0..<count])) }
-        }
-        return Hex.encode(hasher.finalize())
+        do { return try FileHash.sha256(ofFileAt: path) } catch { throw ExecError.notFound(path) }
     }
 }

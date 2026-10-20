@@ -12,6 +12,8 @@ public enum BwError: Error, Equatable, Sendable {
     case binaryNotAllowed(reason: String)
     case signatureMismatch
     case lockBusy
+    /// wardenrun's own state (the lock file, its directory) cannot be created or opened.
+    case stateUnavailable(reason: String)
     case cancelled
     case outputTooLarge
     case notLoggedIn
