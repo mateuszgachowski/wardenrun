@@ -15,13 +15,25 @@ struct BwProcessTests {
 
     private func text(_ bytes: [UInt8]) -> String { String(decoding: bytes, as: UTF8.self) }
 
+    /// A killed process whose parent is gone becomes a zombie until PID 1 reaps it; in a CI
+    /// container PID 1 may never do that. A zombie is dead for every purpose of these tests.
+    private func isZombie(_ pid: pid_t) -> Bool {
+        #if os(Linux)
+        guard let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+              let close = stat.lastIndex(of: ")") else { return false }
+        return stat[stat.index(after: close)...].drop(while: { $0 == " " }).first == "Z"
+        #else
+        return false
+        #endif
+    }
+
     private func isGone(_ pid: pid_t, within seconds: TimeInterval = 3) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
-            if kill(pid, 0) != 0 { return true }
+            if kill(pid, 0) != 0 || isZombie(pid) { return true }
             usleep(20_000)
         }
-        return kill(pid, 0) != 0
+        return kill(pid, 0) != 0 || isZombie(pid)
     }
 
     // MARK: arguments and environment
