@@ -17,6 +17,10 @@ jobs:
         run: sh scripts/test-check-docs.sh
       - name: Docs lint
         run: sh scripts/check-docs.sh
+      - name: Workflow lint tests
+        run: sh scripts/test-check-workflows.sh
+      - name: Workflow lint
+        run: sh scripts/check-workflows.sh
 
   swift-macos:
     runs-on: macos-15
