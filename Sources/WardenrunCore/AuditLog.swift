@@ -2,6 +2,8 @@ import Foundation
 
 public enum AuditEventKind: String, Codable, Sendable {
     case approved, denied, timeout, error, new, setup
+    /// A command that was approved has ended: exit status and duration, never output.
+    case finished
 }
 
 /// What gets recorded about one decision. Never a secret value. Deliberately not `Codable`:
