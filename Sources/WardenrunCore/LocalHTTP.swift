@@ -43,6 +43,8 @@ public final class LocalHTTPClient: @unchecked Sendable {
         if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
     }
 
+    deinit { close() }
+
     /// Makes a request that is blocked, or comes next, fail with `.cancelled`. Thread-safe.
     public func cancel() {
         state.lock(); defer { state.unlock() }

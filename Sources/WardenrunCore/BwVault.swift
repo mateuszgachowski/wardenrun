@@ -14,6 +14,10 @@ public enum BwRung: String, Sendable {
 /// except the bytes of the one chosen item.
 public final class BwVault: @unchecked Sendable {
     private let config: ProtectedConfig
+    /// Bitwarden ids are lower-case GUIDs and `bw serve` compares collection ids exactly, so the
+    /// ids go to the server in lower case whatever case was typed at setup.
+    private let organizationID: String
+    private let collectionIDs: [String]
     private let appDataDir: String
     private let home: String
     private let lockPath: String
@@ -24,13 +28,21 @@ public final class BwVault: @unchecked Sendable {
     private var active: BwServeSession?
     private var cancelled = false
 
-    /// Test hook: sees every reply of every session, before it is wiped.
+    /// Test hook: sees every reply of every session, before it is wiped. Set before the first call.
     var responseObserver: ((HTTPResponse) -> Void)?
+
+    /// Test seam: builds the launcher from the spec and the environment the vault computed, so a
+    /// test can check exactly what the real launcher would receive. Set before the first call.
+    var launcherFactory: (BwLaunchSpec, [String: String]) -> BwServeLauncher = {
+        BwProcessServeLauncher(spec: $0, environment: $1)
+    }
 
     public init(config: ProtectedConfig, appDataDir: String, home: String, lockPath: String,
                 signature: BwSignatureChecker, timeouts: BwTimeouts = .default,
                 launcherOverride: BwServeLauncher? = nil) {
         self.config = config
+        organizationID = config.organizationID.lowercased()
+        collectionIDs = config.collectionIDs.map { $0.lowercased() }
         self.appDataDir = appDataDir
         self.home = home
         self.lockPath = lockPath
@@ -58,8 +70,8 @@ public final class BwVault: @unchecked Sendable {
             let found = try listAllowed(session)
             defer { found.wipeReplies() }
             let ref = try BwItemSelector.select(name: itemName, from: found.hits.map(\.ref),
-                                                organizationID: config.organizationID,
-                                                collectionIDs: config.collectionIDs)
+                                                organizationID: organizationID,
+                                                collectionIDs: collectionIDs)
             guard let hit = found.hits.first(where: { $0.ref.id == ref.id }) else {
                 throw BwError.protocolError("selected item vanished")
             }
@@ -80,8 +92,8 @@ public final class BwVault: @unchecked Sendable {
             defer { found.wipeReplies() }
             do {
                 _ = try BwItemSelector.select(name: name, from: found.hits.map(\.ref),
-                                              organizationID: config.organizationID,
-                                              collectionIDs: config.collectionIDs)
+                                              organizationID: organizationID,
+                                              collectionIDs: collectionIDs)
                 throw BwError.alreadyExists
             } catch BwError.itemNotFound {
                 // free to use
@@ -89,8 +101,8 @@ public final class BwVault: @unchecked Sendable {
                 throw BwError.alreadyExists
             }
 
-            let body = try Self.itemDocument(organizationID: config.organizationID,
-                                             collectionID: config.collectionIDs[0], name: name,
+            let body = try Self.itemDocument(organizationID: organizationID,
+                                             collectionID: collectionIDs[0], name: name,
                                              username: username, uri: uri, secret: secret,
                                              asEnvVariable: asEnvVariable)
             defer { body.wipe() }
@@ -140,7 +152,7 @@ public final class BwVault: @unchecked Sendable {
         try throwIfCancelled()
 
         let spec = try BwBinaryPolicy.launchSpec(for: config.bwPin, signature: signature)
-        let launcher = launcherOverride ?? BwProcessServeLauncher(spec: spec, environment: environment(for: spec))
+        let launcher = launcherOverride ?? launcherFactory(spec, environment(for: spec))
         let session = BwServeSession(launcher: launcher, timeouts: timeouts)
         session.responseObserver = responseObserver
         let alreadyCancelled = state.withLock { () -> Bool in
@@ -220,8 +232,8 @@ public final class BwVault: @unchecked Sendable {
         var listing = Listing()
         do {
             var seen = Set<String>()
-            for collection in config.collectionIDs {
-                let reply = try session.listItems(organizationID: config.organizationID, collectionID: collection)
+            for collection in collectionIDs {
+                let reply = try session.listItems(organizationID: organizationID, collectionID: collection)
                 listing.replies.append(reply)
                 let refs = try reply.body.withUnsafeBytes { try BwListResponse.parse($0) }
                 for ref in refs where seen.insert(ref.id).inserted {

@@ -225,6 +225,28 @@ struct BwServeSessionTests {
         #expect(throws: BwError.protocolError("session closed")) { try session.start() }
     }
 
+    /// Launches through `inner`, then runs `onLaunch` before handing the process back.
+    private final class RacingLauncher: BwServeLauncher, @unchecked Sendable {
+        let inner: BwServeLauncher
+        var onLaunch: (() -> Void)?
+        init(_ inner: BwServeLauncher) { self.inner = inner }
+        func launch() throws -> BwServeHandle {
+            let handle = try inner.launch()
+            onLaunch?()
+            return handle
+        }
+    }
+
+    @Test func aCloseThatRunsWhileTheLaunchIsInProgressDoesNotOrphanTheProcess() {
+        let fake = FakeServe()
+        let racing = RacingLauncher(fake)
+        let session = BwServeSession(launcher: racing)
+        racing.onLaunch = { session.close() }
+        #expect(throws: BwError.protocolError("session closed")) { try session.start() }
+        #expect(fake.handle?.terminated.value == true)
+        #expect(fake.log.isEmpty)   // not even the readiness probe was sent
+    }
+
     @Test func aLaunchFailureSurfaces() {
         let fake = FakeServe()
         fake.launchError = .spawnFailed(errno: ENOENT)

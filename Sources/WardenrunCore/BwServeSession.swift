@@ -130,13 +130,20 @@ public final class BwServeSession: @unchecked Sendable {
             throw error
         }
         let http = LocalHTTPClient(descriptor: launched.descriptor, host: Self.hostHeader)
-        let raced = state.withLock { () -> Bool in
+        let outcome = state.withLock { () -> (accepted: Bool, cancelled: Bool) in
+            // A close() on another thread while the launch ran must not leave the process behind.
+            if closed { return (false, false) }
             handle = launched
             client = http
-            return cancelled
+            return (true, cancelled)
+        }
+        guard outcome.accepted else {
+            http.close()
+            launched.terminate(grace: timeouts.grace)
+            throw BwError.protocolError("session closed")
         }
         // A cancel that came before the client existed.
-        if raced { http.cancel() }
+        if outcome.cancelled { http.cancel() }
 
         do {
             let reply = try exchange("GET", "/status", body: nil, deadline: timeouts.start, phase: "start")
@@ -208,6 +215,9 @@ public final class BwServeSession: @unchecked Sendable {
         guard reply.status == 200, success == true else {
             throw unlockFailure(reply, password: password)
         }
+        // Set only when the server said so. If the request times out or is cancelled after the
+        // server unlocked, no lock is sent (the connection is unusable by then anyway); ending
+        // the process is what discards the key, and what close() does next.
         state.withLock { unlocked = true }
     }
 

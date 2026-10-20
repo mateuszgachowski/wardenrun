@@ -5,22 +5,24 @@ public enum BwExitStatus: Equatable, Sendable {
     case signaled(Int32)
 }
 
-/// A running `bw`. It leads its own process group, so one signal reaches `bw` and anything it
-/// started; stdout and stderr are read by two threads into capped buffers.
-public final class BwChild: @unchecked Sendable {
-    public let pid: pid_t
-
+/// What the two reader threads of one child share with its `BwChild`. The threads hold this and
+/// not the `BwChild`: they only finish when the pipes close, which is when the child is gone, so
+/// if they held the `BwChild` it could never be freed while its child ran.
+private final class BwOutput: @unchecked Sendable {
+    private let pid: pid_t
+    private let limit: Int
     private let state = NSLock()
-    private var status: BwExitStatus?
     private var stdout: [UInt8] = []
     private var stderr: [UInt8] = []
     private var overflowed = false
-    private let limit: Int
-    private let readers = DispatchGroup()
+    let readers = DispatchGroup()
 
-    fileprivate init(pid: pid_t, stdoutFD: Int32, stderrFD: Int32, limit: Int) {
+    init(pid: pid_t, limit: Int) {
         self.pid = pid
         self.limit = limit
+    }
+
+    func startReading(stdoutFD: Int32, stderrFD: Int32) {
         for (descriptor, isStdout) in [(stdoutFD, true), (stderrFD, false)] {
             readers.enter()
             Thread.detachNewThread { [self] in
@@ -28,18 +30,6 @@ public final class BwChild: @unchecked Sendable {
                 drain(descriptor, isStdout: isStdout)
                 close(descriptor)
             }
-        }
-    }
-
-    deinit {
-        // A child nobody terminated must not outlive its owner.
-        state.lock()
-        let unreaped = status == nil
-        state.unlock()
-        if unreaped {
-            killpg(pid, SIGKILL)
-            var raw: Int32 = 0
-            _ = waitpid(pid, &raw, 0)
         }
     }
 
@@ -67,9 +57,42 @@ public final class BwChild: @unchecked Sendable {
         }
     }
 
-    public var capturedStdout: [UInt8] { state.lock(); defer { state.unlock() }; return stdout }
-    public var capturedStderr: [UInt8] { state.lock(); defer { state.unlock() }; return stderr }
-    public var outputOverflowed: Bool { state.lock(); defer { state.unlock() }; return overflowed }
+    var capturedStdout: [UInt8] { state.lock(); defer { state.unlock() }; return stdout }
+    var capturedStderr: [UInt8] { state.lock(); defer { state.unlock() }; return stderr }
+    var outputOverflowed: Bool { state.lock(); defer { state.unlock() }; return overflowed }
+}
+
+/// A running `bw`. It leads its own process group, so one signal reaches `bw` and anything it
+/// started; stdout and stderr are read by two threads into capped buffers. Dropping the last
+/// reference to a child that is still running kills its group.
+public final class BwChild: @unchecked Sendable {
+    public let pid: pid_t
+
+    private let state = NSLock()
+    private var status: BwExitStatus?
+    private let output: BwOutput
+
+    fileprivate init(pid: pid_t, stdoutFD: Int32, stderrFD: Int32, limit: Int) {
+        self.pid = pid
+        output = BwOutput(pid: pid, limit: limit)
+        output.startReading(stdoutFD: stdoutFD, stderrFD: stderrFD)
+    }
+
+    deinit {
+        // A child nobody terminated must not outlive its owner.
+        state.lock()
+        let unreaped = status == nil
+        state.unlock()
+        if unreaped {
+            killpg(pid, SIGKILL)
+            var raw: Int32 = 0
+            _ = waitpid(pid, &raw, 0)
+        }
+    }
+
+    public var capturedStdout: [UInt8] { output.capturedStdout }
+    public var capturedStderr: [UInt8] { output.capturedStderr }
+    public var outputOverflowed: Bool { output.outputOverflowed }
 
     /// Reaps the child if it has exited. Returns its status, or nil while it still runs.
     private func poll() -> BwExitStatus? {
@@ -102,7 +125,7 @@ public final class BwChild: @unchecked Sendable {
 
     /// True when both pipes reached end-of-file within `timeout`.
     func waitForOutput(timeout: TimeInterval) -> Bool {
-        readers.wait(timeout: .now() + timeout) == .success
+        output.readers.wait(timeout: .now() + timeout) == .success
     }
 
     func killGroup() { killpg(pid, SIGKILL) }
@@ -125,8 +148,13 @@ public enum BwProcess {
     private static let firstSpareDescriptor: Int32 = 100
 
     /// `inherit` lists descriptors the child receives: `parent` is a descriptor of this process,
-    /// `child` the number it gets there (3 to 99, no repeats). Every other descriptor is closed
-    /// in the child. stdin is `/dev/null`.
+    /// `child` the number it gets there (3 to 99, no repeats). stdin is `/dev/null`.
+    ///
+    /// Every other descriptor is closed in the child on macOS (`POSIX_SPAWN_CLOEXEC_DEFAULT`). On
+    /// Linux there is no such flag: only descriptors that are close-on-exec stay out, which is
+    /// true of everything wardenrun opens. Spawns should not run at the same moment as the code
+    /// that creates a descriptor and only afterwards marks it close-on-exec (`pipe`, `socketpair`
+    /// on Darwin); wardenrun starts one `bw` at a time under `bw.lock`.
     public static func start(spec: BwLaunchSpec, arguments: [String], environment: [String: String],
                              inherit: [(parent: Int32, child: Int32)] = [],
                              captureLimit: Int = 1 << 20) throws -> BwChild {

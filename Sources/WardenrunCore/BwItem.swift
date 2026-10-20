@@ -113,11 +113,13 @@ public enum BwItemSelector {
     public static func select(name: String, from refs: [BwItemRef], organizationID: String,
                               collectionIDs: [String]) throws -> BwItemRef {
         let wanted = Array(name.utf8)
-        let allowed = Set(collectionIDs)
+        // Bitwarden ids are GUIDs: the case they are written in carries no meaning.
+        let allowed = Set(collectionIDs.map { $0.lowercased() })
+        let organization = organizationID.lowercased()
         let matches = refs.filter { ref in
             !ref.isDeleted
-                && ref.organizationID == organizationID
-                && !allowed.isDisjoint(with: ref.collectionIDs)
+                && ref.organizationID?.lowercased() == organization
+                && !allowed.isDisjoint(with: ref.collectionIDs.map { $0.lowercased() })
                 && Array(ref.name.utf8) == wanted
         }
         switch matches.count {
@@ -177,35 +179,41 @@ public final class BwFetchedItem: @unchecked Sendable {
     }
 
     /// Names `VAR` of the custom fields called `env:VAR` (DESIGN 5.4). Not validated here; the
-    /// caller checks them with `EnvPolicy.validateInjectedName`.
-    public var envFieldNames: [String] {
-        guard !itemJSON.isWiped else { return [] }
+    /// caller checks them with `EnvPolicy.validateInjectedName`. A malformed item is an error, not
+    /// a shorter list.
+    public func envFieldNames() throws -> [String] {
+        guard !itemJSON.isWiped else { throw BwError.protocolError("item already wiped") }
         let prefix = Array("env:".utf8)
         var names: [String] = []
-        _ = try? itemJSON.withUnsafeBytes { raw in
-            var cursor = JSONCursor(raw)
-            try cursor.members { key, value in
-                guard isKey(key, "fields"), try value.kind() == .array else {
-                    try value.skipValue()
-                    return
-                }
-                try value.elements { _, element in
-                    guard try element.kind() == .object else {
-                        try element.skipValue()
+        do {
+            try itemJSON.withUnsafeBytes { raw in
+                var cursor = JSONCursor(raw)
+                try cursor.members { key, value in
+                    guard isKey(key, "fields"), try value.kind() == .array else {
+                        try value.skipValue()
                         return
                     }
-                    try element.members { fieldKey, fieldValue in
-                        if isKey(fieldKey, "name"), try fieldValue.kind() == .string {
-                            let fieldName = try fieldValue.string()
-                            if fieldName.starts(with: prefix) {
-                                names.append(String(decoding: fieldName.dropFirst(prefix.count), as: UTF8.self))
+                    try value.elements { _, element in
+                        guard try element.kind() == .object else {
+                            try element.skipValue()
+                            return
+                        }
+                        try element.members { fieldKey, fieldValue in
+                            if isKey(fieldKey, "name"), try fieldValue.kind() == .string {
+                                let fieldName = try fieldValue.string()
+                                if fieldName.starts(with: prefix) {
+                                    names.append(String(decoding: fieldName.dropFirst(prefix.count), as: UTF8.self))
+                                }
+                            } else {
+                                try fieldValue.skipValue()
                             }
-                        } else {
-                            try fieldValue.skipValue()
                         }
                     }
                 }
+                try cursor.finish()
             }
+        } catch is JSONError {
+            throw BwError.protocolError("malformed item")
         }
         return names
     }
@@ -268,6 +276,7 @@ public final class BwFetchedItem: @unchecked Sendable {
             }
         case .custom(let wanted):
             let wantedBytes = Array(wanted.utf8)
+            var matched = false
             try cursor.members { key, value in
                 guard isKey(key, "fields"), try value.kind() == .array else {
                     try value.skipValue()
@@ -290,8 +299,10 @@ public final class BwFetchedItem: @unchecked Sendable {
                             try fieldValue.skipValue()
                         }
                     }
-                    if result == nil, fieldName == wantedBytes, var probe = valueCursor {
-                        result = try secretOrNil(&probe)
+                    // The first field of that name decides, even when its value is null.
+                    if !matched, fieldName == wantedBytes {
+                        matched = true
+                        if var probe = valueCursor { result = try secretOrNil(&probe) }
                     }
                 }
             }
