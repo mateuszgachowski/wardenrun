@@ -143,9 +143,17 @@ public final class BwVault: @unchecked Sendable {
         ]))
     }
 
+    // MARK: verify
+
+    /// Unlocks and locks again and reads nothing: `setup` uses it to prove that the stored master
+    /// password and the logged-in profile belong together before anything is saved.
+    public func verifyLogin() throws {
+        try withUnlockedSession(sync: false) { _ in }
+    }
+
     // MARK: session
 
-    private func withUnlockedSession<T>(_ body: (BwServeSession) throws -> T) throws -> T {
+    private func withUnlockedSession<T>(sync: Bool = true, _ body: (BwServeSession) throws -> T) throws -> T {
         try throwIfCancelled()
         let lock = try acquireLock()
         defer { lock.release() }
@@ -168,7 +176,7 @@ public final class BwVault: @unchecked Sendable {
 
         try session.start()
         try session.unlock(password: config.masterPassword)
-        try session.sync()
+        if sync { try session.sync() }
         return try body(session)
     }
 

@@ -230,9 +230,11 @@ public enum BwProcess {
     /// Runs a short command to the end. Throws `.timeout` after `deadline` seconds (the group is
     /// killed) and `.outputTooLarge` when either stream passes `captureLimit` bytes.
     public static func run(spec: BwLaunchSpec, arguments: [String], environment: [String: String],
+                           inherit: [(parent: Int32, child: Int32)] = [],
                            deadline: TimeInterval, captureLimit: Int = 1 << 20)
         throws -> (status: BwExitStatus, stdout: [UInt8], stderr: [UInt8]) {
-        let child = try start(spec: spec, arguments: arguments, environment: environment, captureLimit: captureLimit)
+        let child = try start(spec: spec, arguments: arguments, environment: environment, inherit: inherit,
+                              captureLimit: captureLimit)
         defer { child.terminate(grace: 1) }
         guard let status = child.wait(timeout: deadline) else { throw BwError.timeout(phase: "bw command") }
         if !child.waitForOutput(timeout: 1) {
