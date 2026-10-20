@@ -360,6 +360,25 @@ enum BwReply {
         return found
     }
 
+    /// `data.id` of an item reply, if it is a plausible id: 1 to 64 letters, digits and hyphens.
+    /// The id is printed to the user later, so nothing else is let through.
+    static func createdID(_ body: UnsafeRawBufferPointer) -> String? {
+        var found: [UInt8]?
+        guard scan(body, { key, value in
+            guard isKey(key, "data"), try value.kind() == .object else { try value.skipValue(); return }
+            try value.members { dataKey, dataValue in
+                if isKey(dataKey, "id"), try dataValue.kind() == .string {
+                    found = try dataValue.string()
+                } else {
+                    try dataValue.skipValue()
+                }
+            }
+        }), let found, (1...64).contains(found.count), found.allSatisfy({
+            ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x5A) || ($0 >= 0x61 && $0 <= 0x7A) || $0 == 0x2D
+        }) else { return nil }
+        return String(decoding: found, as: UTF8.self)
+    }
+
     private static func scan(_ body: UnsafeRawBufferPointer,
                              _ member: (_ key: [UInt8], _ value: inout JSONCursor) throws -> Void) -> Bool {
         var cursor = JSONCursor(body)

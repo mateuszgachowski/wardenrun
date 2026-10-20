@@ -6,6 +6,8 @@ public indirect enum SecretJSONValue {
     case string(String)
     case secret(SecretBuffer)
     case bool(Bool)
+    /// A whole number, for the small fixed fields of an item (`type`, `reprompt`).
+    case integer(Int)
     case null
     case array([SecretJSONValue])
     case object([(String, SecretJSONValue)])
@@ -54,6 +56,8 @@ public enum SecretJSON {
             sink.put("null")
         case .bool(let flag):
             if flag { sink.put("true") } else { sink.put("false") }
+        case .integer(let number):
+            for byte in String(number).utf8 { sink.put(byte) }
         case .string(let text):
             sink.put(0x22)
             for byte in text.utf8 { escape(byte, into: &sink) }

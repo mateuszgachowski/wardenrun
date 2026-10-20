@@ -132,6 +132,17 @@ struct SecretJSONTests {
         #expect(text(try SecretJSON.encode(.string("x"))) == "\"x\"")
     }
 
+    @Test func integersAreWrittenInDecimalWithoutQuotes() throws {
+        #expect(text(try SecretJSON.encode(.integer(0))) == "0")
+        #expect(text(try SecretJSON.encode(.integer(1))) == "1")
+        #expect(text(try SecretJSON.encode(.integer(-42))) == "-42")
+        #expect(text(try SecretJSON.encode(.integer(Int.max))) == String(Int.max))
+        #expect(text(try SecretJSON.encode(.integer(Int.min))) == String(Int.min))
+        let body = try SecretJSON.encode(.object([("type", .integer(1)), ("reprompt", .integer(0))]))
+        let parsed = try JSONSerialization.jsonObject(with: body.withUnsafeBytes { Data($0) }) as? [String: Int]
+        #expect(parsed == ["type": 1, "reprompt": 0])
+    }
+
     @Test func memberOrderIsKept() throws {
         let body = try SecretJSON.encode(.object([("b", .null), ("a", .null), ("c", .null)]))
         #expect(text(body) == "{\"b\":null,\"a\":null,\"c\":null}")
