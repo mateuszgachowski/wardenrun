@@ -16,21 +16,29 @@ public final class SecretBuffer: @unchecked Sendable, CustomStringConvertible, C
     /// still works and is still zeroed.
     public let isLocked: Bool
 
-    public init(copying bytes: [UInt8]) {
+    /// An exact-size, zero-filled buffer that `fill` writes into once, in place. Nothing is
+    /// copied through a growing array on the way, which is why writers use this.
+    public init(count: Int, fill: (UnsafeMutableRawBufferPointer) throws -> Void) rethrows {
         let page = max(Int(sysconf(Int32(_SC_PAGESIZE))), 4096)
-        let size = max(bytes.count, 1)
+        let size = max(count, 1)
         capacity = (size + page - 1) / page * page
         var allocation: UnsafeMutableRawPointer?
         guard posix_memalign(&allocation, page, capacity) == 0, let pointer = allocation else {
             fatalError("out of memory allocating a SecretBuffer")
         }
         storage = pointer
-        length = bytes.count
+        length = count
         memset(pointer, 0, capacity)
-        bytes.withUnsafeBytes { source in
-            if let base = source.baseAddress { memcpy(pointer, base, source.count) }
-        }
         isLocked = mlock(pointer, capacity) == 0
+        try fill(UnsafeMutableRawBufferPointer(start: pointer, count: count))
+    }
+
+    public convenience init(copying bytes: [UInt8]) {
+        self.init(count: bytes.count) { destination in
+            bytes.withUnsafeBytes { source in
+                if let from = source.baseAddress, let to = destination.baseAddress { memcpy(to, from, source.count) }
+            }
+        }
     }
 
     deinit {

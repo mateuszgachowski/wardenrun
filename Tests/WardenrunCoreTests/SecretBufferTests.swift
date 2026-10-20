@@ -58,4 +58,27 @@ struct SecretBufferTests {
         buffer.wipe()
         #expect("\(buffer)" == "SecretBuffer(wiped)")
     }
+    @Test func initWithFillProducesABufferOfTheExactSize() {
+        let buffer = SecretBuffer(count: 5) { raw in
+            #expect(raw.count == 5)
+            for index in 0..<5 { raw[index] = UInt8(65 + index) }
+        }
+        #expect(buffer.count == 5)
+        #expect(buffer.withUnsafeBytes { Array($0) } == Array("ABCDE".utf8))
+        buffer.wipe()
+        #expect(buffer.storageForTesting.allSatisfy { $0 == 0 })
+    }
+
+    @Test func initWithFillAndZeroCountGivesAnEmptyBuffer() {
+        let buffer = SecretBuffer(count: 0) { raw in #expect(raw.count == 0) }
+        #expect(buffer.count == 0)
+    }
+
+    private struct FillFailed: Error {}
+
+    @Test func aThrowingFillPropagatesItsError() {
+        #expect(throws: FillFailed.self) {
+            _ = try SecretBuffer(count: 8) { _ in throw FillFailed() }
+        }
+    }
 }
