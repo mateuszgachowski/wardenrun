@@ -20,5 +20,5 @@ printf '%s\n' "$sha256" | grep -Eq '^[0-9a-f]{64}$' || usage "SHA256 must be 64 
 printf '%s\n' "$cert" | grep -Eq '^[0-9a-f]{40}$' || usage "CERT_SHA1 must be 40 lower-case hex digits"
 [ -f "$template" ] || usage "template not found: $template"
 
-asset="wardenrun-$version-macos-universal.tar.gz"
+asset=$(sh "$here/release-info.sh" name "$version") || usage "no asset name for $version"
 sed -e "s/@VERSION@/$version/g" -e "s/@ASSET@/$asset/g" -e "s/@SHA256@/$sha256/g" -e "s/@CERT_SHA1@/$cert/g" "$template"

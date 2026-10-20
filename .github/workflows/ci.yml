@@ -23,6 +23,8 @@ jobs:
         run: sh scripts/check-workflows.sh
       - name: Formula renderer tests
         run: sh scripts/test-render-formula.sh
+      - name: Release info tests
+        run: sh scripts/test-release-info.sh
 
   swift-macos:
     runs-on: macos-15
@@ -39,6 +41,20 @@ jobs:
         run: swift test
       - name: Release build, ad-hoc signature with the hardened runtime, doctor
         run: sh scripts/ci-signed-build.sh
+      - name: Release script argument tests
+        run: sh scripts/test-verify-release-binary.sh
+
+  # The whole signing pipeline with a throw-away certificate, so that a broken script is found
+  # in a pull request and not at the first tag. Nothing here is a release.
+  release-dry-run:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Package, sign, verify with a throw-away certificate
+        run: sh scripts/ci-release-dry-run.sh
 
   swift-linux:
     runs-on: ubuntu-latest

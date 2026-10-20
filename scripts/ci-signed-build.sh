@@ -12,6 +12,12 @@ codesign --force --sign - --options runtime "$binary"
 codesign --verify --strict "$binary"
 codesign -d --verbose=2 "$binary" 2>&1 | grep -q 'flags=0x10002(adhoc,runtime)'
 
+# The release verifier must reject this binary: it is ad hoc, not signed by the release certificate.
+status=0
+verdict="$(sh scripts/verify-release-binary.sh "$binary" 0000000000000000000000000000000000000000 0.0.0 2>&1)" || status=$?
+[ "$status" -eq 1 ] || { echo "ci: the release verifier accepted an ad-hoc binary ($status)" >&2; exit 1; }
+printf '%s\n' "$verdict" | grep -q 'does not name certificate' || { echo "ci: unexpected verifier output: $verdict" >&2; exit 1; }
+
 output="$("$binary" doctor || true)"
 printf '%s\n' "$output"
 
