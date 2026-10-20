@@ -97,7 +97,8 @@ public struct JSONCursor {
     // MARK: containers
 
     /// Walks the members of an object. `body` must consume exactly one value from the cursor it
-    /// is given; consuming none or two is a syntax error.
+    /// is given. Consuming none is a syntax error; consuming two is not detected (the second value
+    /// would just be read as part of the first), so every caller takes exactly one.
     public mutating func members(_ body: (_ key: [UInt8], _ value: inout JSONCursor) throws -> Void) throws {
         try expect(.object)
         try enter()

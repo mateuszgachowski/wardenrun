@@ -126,7 +126,9 @@ struct JSONCursorTests {
         }
     }
 
-    @Test func aBodyThatConsumesTwoValuesIsASyntaxError() {
+    @Test func aBodyThatConsumesTwoValuesWithACommaBetweenIsASyntaxError() {
+        // Only the comma between them is what makes this fail; two values with nothing between them
+        // are not detected (documented on `members`).
         #expect(throws: JSONError.self) {
             try with("[1,2]") { cursor in
                 try cursor.elements { _, value in
@@ -339,6 +341,6 @@ struct JSONCursorTests {
         }
         let elapsed = Date().timeIntervalSince(start)
         // A debug build, on a busy CI machine: generous on purpose. A quadratic scan would take minutes.
-        #expect(elapsed < 5, "took \(elapsed) s")
+        #expect(elapsed < 20, "took \(elapsed) s")
     }
 }

@@ -167,6 +167,16 @@ struct BwProcessTests {
                 let result = try runShell("(echo x >&\"$0\") 2>/dev/null; echo $?", ["\(descriptor)"])
                 #expect(text(result.stdout) != "0\n", "descriptor \(descriptor) reached the child")
             }
+            // Positive control: the same shell line on a descriptor that IS inherited, at a two-digit
+            // number, prints 0. Without it the checks above could pass because the shell cannot
+            // redirect to a multi-digit descriptor at all.
+            let listed = open("/dev/null", O_RDWR | O_CLOEXEC)
+            defer { close(listed) }
+            let child = try BwProcess.start(spec: shell, arguments: ["(echo x >&\"$0\") 2>/dev/null; echo $?", "41"],
+                                            environment: plainEnvironment, inherit: [(parent: listed, child: 41)])
+            defer { child.terminate(grace: 0.5) }
+            #expect(child.wait(timeout: 5) == .exited(0))
+            #expect(text(child.capturedStdout) == "0\n")
         }
     }
 
@@ -195,20 +205,36 @@ struct BwProcessTests {
     }
 
     @Test func theInheritedParentDescriptorMayAlreadyHaveTheTargetNumber() throws {
-        // Occupy descriptor numbers until a socket end sits on the requested number 3 or above, then ask for 3.
+        // The parent's descriptor already sits on the number the child is to get. A free high
+        // number is taken with F_DUPFD, so that no parallel test loses a low descriptor to this one.
         let (parentEnd, childEnd) = try SocketPair.make()
-        defer { close(parentEnd); close(childEnd) }
-        var moved = childEnd
-        if moved != 3 {
-            // dup2 onto 3 only when it is free in this process; the test is meaningful either way.
-            let free = fcntl(3, F_GETFD) < 0
-            if free { moved = dup2(childEnd, 3); _ = fcntl(3, F_SETFD, FD_CLOEXEC) }
-        }
-        let child = try BwProcess.start(spec: shell, arguments: ["echo ok >&3"], environment: plainEnvironment,
-                                        inherit: [(parent: moved, child: 3)])
-        defer { child.terminate(grace: 0.5); if moved == 3 { close(3) } }
+        defer { close(parentEnd) }
+        let moved = fcntl(childEnd, F_DUPFD_CLOEXEC, 60)
+        close(childEnd)
+        try #require(moved >= 60 && moved < 100)
+        let child = try BwProcess.start(spec: shell, arguments: ["echo ok >&\"$0\"", "\(moved)"], environment: plainEnvironment,
+                                        inherit: [(parent: moved, child: moved)])
+        close(moved)
+        defer { child.terminate(grace: 0.5) }
         var buffer = [UInt8](repeating: 0, count: 8)
         #expect(read(parentEnd, &buffer, buffer.count) == 3)
+    }
+
+    @Test func droppingARunningChildKillsItsWholeGroup() throws {
+        try withTempDirectory { dir in
+            let pidFile = dir + "/pids"
+            do {
+                let child = try BwProcess.start(spec: shell, arguments: ["sleep 30 & echo $$ $! > \"$0.tmp\"; mv \"$0.tmp\" \"$0\"; wait", pidFile],
+                                                environment: plainEnvironment)
+                let deadline = Date().addingTimeInterval(10)
+                while !FileManager.default.fileExists(atPath: pidFile) && Date() < deadline { usleep(20_000) }
+                _ = child.pid
+            }
+            let pids = try String(contentsOfFile: pidFile, encoding: .utf8).split(separator: " ")
+                .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            #expect(pids.count == 2)
+            for pid in pids { #expect(isGone(pid), "pid \(pid) outlived its dropped BwChild") }
+        }
     }
 
     // MARK: spawn failures

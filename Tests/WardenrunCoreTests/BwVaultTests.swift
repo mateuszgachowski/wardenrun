@@ -91,13 +91,30 @@ struct BwVaultTests {
             #expect(text(try fetched.value(of: .password)) == Self.itemPassword)
             #expect(text(try fetched.value(of: .username)) == "octo")
             #expect(text(try fetched.value(of: .custom("env:IT_TOKEN"))) == "tok-123")
-            #expect(fetched.envFieldNames == ["IT_TOKEN"])
+            let envNames = try fetched.envFieldNames()
+            #expect(envNames == ["IT_TOKEN"])
             #expect(rig.fake.log == ["GET /status", "POST /unlock", "POST /sync",
                                      "GET /list/object/items?organizationId=org-1&collectionId=col-a",
                                      "GET /list/object/items?organizationId=org-1&collectionId=col-b",
                                      "POST /lock"])
             #expect(rig.fake.handle?.terminated.value == true)
             #expect(rig.checker.calls == ["LTZ2PFU5D6@" + rig.bw])
+            fetched.wipe()
+        }
+    }
+
+    @Test func idsTypedInUpperCaseReachTheServerInLowerCase() throws {
+        try withRig { rig in
+            rig.collections = ["COL-A"]
+            let upperConfig = try ProtectedConfig(
+                serverURL: URL(string: "https://vault.example")!, accountEmail: "it-user@example.test", organizationID: "ORG-1",
+                collectionIDs: ["COL-A"], masterPassword: SecretBuffer(copying: Array(rig.password.utf8)),
+                bwPin: .signedRelease(teamID: "LTZ2PFU5D6", path: rig.bw))
+            rig.fake.listBody = try list([item("i1", "it-x", collections: ["col-a"])])
+            let vault = BwVault(config: upperConfig, appDataDir: rig.dir + "/appdata", home: rig.dir + "/home",
+                                lockPath: rig.lockPath, signature: rig.checker, timeouts: rig.timeouts, launcherOverride: rig.fake)
+            let fetched = try vault.fetch(itemName: "it-x")
+            #expect(rig.fake.log.contains("GET /list/object/items?organizationId=org-1&collectionId=col-a"))
             fetched.wipe()
         }
     }
@@ -444,6 +461,32 @@ struct BwVaultTests {
             let vault = try rig.vault()
             #expect(vault.rung == .socketpair)
             #expect(BwRung.socketpair.rawValue == "socketpair")
+        }
+    }
+
+    @Test func theLauncherReceivesExactlyTheAllowlistedEnvironmentNotTheCallers() throws {
+        setenv("BW_SESSION", "leaked-session", 1)
+        setenv("NODE_OPTIONS", "--require /evil.js", 1)
+        defer { unsetenv("BW_SESSION"); unsetenv("NODE_OPTIONS") }
+        try withRig { rig in
+            rig.fake.listBody = try list([item("i1", "x")])
+            let vault = BwVault(config: try rig.config(), appDataDir: rig.dir + "/appdata", home: rig.dir + "/home",
+                                lockPath: rig.lockPath, signature: rig.checker, timeouts: rig.timeouts)
+            let seen = Box<[(BwLaunchSpec, [String: String])]>([])
+            let fake = rig.fake
+            vault.launcherFactory = { spec, environment in
+                seen.value.append((spec, environment))
+                return fake
+            }
+            try vault.fetch(itemName: "x").wipe()
+            let (spec, environment) = try #require(seen.value.first)
+            #expect(seen.value.count == 1)
+            #expect(spec.executable == rig.bw)
+            let expected = EnvPolicy.bwEnvironment(home: rig.dir + "/home", appDataDir: rig.dir + "/appdata",
+                                                   pinnedDirectories: [rig.dir + "/bin"], nodeExtraCACerts: "/etc/ca.pem",
+                                                   httpsProxy: "http://proxy.example:3128")
+            #expect(environment == expected)
+            #expect(environment["BW_SESSION"] == nil && environment["NODE_OPTIONS"] == nil)
         }
     }
 

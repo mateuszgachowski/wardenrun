@@ -270,10 +270,32 @@ struct BwItemTests {
         #expect(try item.value(of: .custom("missing")) == nil)
     }
 
-    @Test func envFieldNamesListsOnlyEnvPrefixedCustomFields() {
+    @Test func envFieldNamesListsOnlyEnvPrefixedCustomFields() throws {
         let item = fetched(itemJSON(fields: [Field(name: "env:IT_TOKEN", value: "x"), Field(name: "api_key", value: "y"),
                                              Field(name: "ENV:UPPER", value: "z"), Field(name: "env:SECOND", value: "w", type: 0)]))
-        #expect(item.envFieldNames == ["IT_TOKEN", "SECOND"])
+        let names = try item.envFieldNames()
+        #expect(names == ["IT_TOKEN", "SECOND"])
+    }
+
+    @Test func envFieldNamesOfAMalformedItemIsAnErrorNotAShorterList() {
+        let broken = BwFetchedItem(itemJSON: SecretBuffer(copying: Array("{\"fields\":[{\"name\":\"env:A\",\"value\":".utf8)),
+                                   id: "i", name: "n")
+        #expect(throws: BwError.protocolError("malformed item")) { _ = try broken.envFieldNames() }
+    }
+
+    @Test func theFirstCustomFieldOfANameDecidesEvenWhenItsValueIsNull() throws {
+        let item = fetched(itemJSON(fields: [Field(name: "dup", value: nil), Field(name: "dup", value: "later")]))
+        let value = try item.value(of: .custom("dup"))
+        #expect(value == nil)
+    }
+
+    @Test func idsAreComparedWithoutRegardToCase() throws {
+        let refs = [ref("it-x", org: "ABCDEF-1", collections: ["COL-A"])]
+        let picked = try BwItemSelector.select(name: "it-x", from: refs, organizationID: "abcdef-1", collectionIDs: ["col-a"])
+        #expect(picked.name == "it-x")
+        let again = try BwItemSelector.select(name: "it-x", from: [ref("it-x", org: "abcdef-1", collections: ["col-a"])],
+                                              organizationID: "ABCDEF-1", collectionIDs: ["COL-A"])
+        #expect(again.name == "it-x")
     }
 
     @Test func extractedValueBuffersAreLockedLikeAnyOtherSecretBuffer() throws {
@@ -286,7 +308,7 @@ struct BwItemTests {
         item.wipe()
         #expect(item.isWipedForTesting)
         #expect(throws: BwError.protocolError("item already wiped")) { _ = try item.value(of: .password) }
-        #expect(item.envFieldNames.isEmpty)
+        #expect(throws: BwError.protocolError("item already wiped")) { _ = try item.envFieldNames() }
     }
 
     @Test func malformedItemBytesGiveAProtocolError() {
