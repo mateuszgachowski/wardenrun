@@ -213,3 +213,16 @@ struct CommandLineTests {
         for error in errors { #expect(!error.message.isEmpty && !error.message.contains("\n")) }
     }
 }
+
+struct UsageTextTests {
+    @Test func theHelpTextNamesEveryCommandAndOption() {
+        for word in ["wardenrun run", "wardenrun new", "wardenrun setup", "wardenrun doctor", "version", "help",
+                     "--env", "--file", "--stdin", "--username", "--uri", "--length", "--charset", "--bw"] {
+            #expect(Usage.text.contains(word), "\(word)")
+        }
+    }
+
+    @Test func theHelpTextClaimsNothingTheDesignDoesNotSay() {
+        #expect(!Usage.text.lowercased().contains("touch id protected"))
+    }
+}
