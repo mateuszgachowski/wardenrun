@@ -16,6 +16,10 @@ public struct SetupSteps: Sendable {
     public var install: @Sendable () throws -> BwPin
     public var configureBw: @Sendable (ProtectedConfig) throws -> Void
     public var verify: @Sendable (ProtectedConfig) throws -> Void
+    /// Puts the staged `bw` profile (logged in and verified) in place of the live one.
+    public var commitProfile: @Sendable () throws -> Void
+    /// Removes whatever `configureBw` staged and `commitProfile` did not take. Called on every way out.
+    public var discardProfile: @Sendable () -> Void
     public var save: @Sendable (ProtectedConfig) throws -> Void
     public var audit: @Sendable (AuditEvent) -> Void
 
@@ -27,6 +31,8 @@ public struct SetupSteps: Sendable {
                 install: @escaping @Sendable () throws -> BwPin,
                 configureBw: @escaping @Sendable (ProtectedConfig) throws -> Void,
                 verify: @escaping @Sendable (ProtectedConfig) throws -> Void,
+                commitProfile: @escaping @Sendable () throws -> Void,
+                discardProfile: @escaping @Sendable () -> Void,
                 save: @escaping @Sendable (ProtectedConfig) throws -> Void,
                 audit: @escaping @Sendable (AuditEvent) -> Void) {
         self.isInteractive = isInteractive
@@ -38,20 +44,24 @@ public struct SetupSteps: Sendable {
         self.install = install
         self.configureBw = configureBw
         self.verify = verify
+        self.commitProfile = commitProfile
+        self.discardProfile = discardProfile
         self.save = save
         self.audit = audit
     }
 }
 
 public enum SetupFlow {
-    /// Nothing is changed before a human approved the new values, and the protected item is
-    /// saved only after `bw` logged in and unlock/lock worked with exactly those values.
-    /// Returns the one line to print.
+    /// Nothing is changed before a human approved the new values. `bw` is logged in under a
+    /// staged profile; the live profile is replaced and the protected item saved only after
+    /// unlock/lock worked with exactly those values, so a failure leaves the working setup as it
+    /// was. Returns the one line to print.
     public static func run(_ steps: SetupSteps) throws -> String {
         try Setup.requireInteractive(steps.isInteractive)
 
         let old: ProtectedConfig?
-        do { old = try steps.existing() } catch is StoreError { old = nil }
+        var replacesUnreadable = false
+        do { old = try steps.existing() } catch is StoreError { old = nil; replacesUnreadable = true }
 
         func answer(_ question: String, _ fallback: String?) throws -> String {
             let typed = try steps.ask(question, fallback).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,14 +81,20 @@ public enum SetupFlow {
             masterPassword: password, bwPin: steps.plannedPin,
             nodeExtraCACerts: old?.nodeExtraCACerts, httpsProxy: old?.httpsProxy))
 
-        let text = try Setup.approvalText(old: old, new: config)
-        guard try steps.approve(text) == .approved else { throw SetupError.denied }
+        let text = try Setup.approvalText(old: old, new: config, replacesUnreadable: replacesUnreadable)
+        switch try steps.approve(text) {
+        case .approved: break
+        case .unavailable(let reason): throw SetupError.approvalUnavailable(reason: reason)
+        case .denied, .timedOut: throw SetupError.denied
+        }
 
+        defer { steps.discardProfile() }
         guard try steps.install() == steps.plannedPin else {
             throw SetupError.installFailed(reason: "the installed bw is not the one that was approved")
         }
         try steps.configureBw(config)
         try steps.verify(config)
+        try steps.commitProfile()
         try steps.save(config)
         steps.audit(AuditEvent(event: .setup))
 

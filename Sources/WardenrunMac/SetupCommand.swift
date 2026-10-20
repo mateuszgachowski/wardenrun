@@ -18,6 +18,8 @@ public enum SetupCommand {
         let gate = ApprovalGate(stateDirectory: paths.stateDirectory)
         let plannedPin = BwPin.signedRelease(teamID: bitwardenTeamID, path: paths.installedBw)
         let audit = AuditLog(path: paths.auditLog, redactor: { $0 })
+        // `bw` is logged in under a staged profile and only a verified one replaces the live one.
+        let staged = paths.bwAppData + ".staged-" + UUID().uuidString
 
         let steps = SetupSteps(
             isInteractive: Terminal.isInteractive(),
@@ -56,14 +58,20 @@ public enum SetupCommand {
                 return try Setup.installBw(from: source, teamID: bitwardenTeamID, to: paths.installedBw, signature: signature)
             },
             configureBw: { config in
-                try Setup.configureBw(config: config, appDataDir: paths.bwAppData, home: paths.home,
+                try FileManager.default.createDirectory(atPath: staged, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+                try Setup.configureBw(config: config, appDataDir: staged, home: paths.home,
                                       lockPath: paths.lockFile, signature: signature, timeouts: .default)
             },
             verify: { config in
-                let vault = BwVault(config: config, appDataDir: paths.bwAppData, home: paths.home,
+                let vault = BwVault(config: config, appDataDir: staged, home: paths.home,
                                     lockPath: paths.lockFile, signature: signature)
                 try Setup.verify(vault: vault)
             },
+            commitProfile: {
+                try Setup.commitProfile(staged: staged, live: paths.bwAppData, lockPath: paths.lockFile, timeouts: .default)
+            },
+            discardProfile: { Setup.discardProfile(staged: staged) },
             save: { config in try store.save(config) },
             audit: { event in
                 var event = event
@@ -101,7 +109,9 @@ public enum SetupCommand {
     static func findBw(in path: String) -> String? {
         for directory in path.split(separator: ":") where directory.hasPrefix("/") {
             let candidate = String(directory) + "/bw"
-            if access(candidate, X_OK) == 0 { return candidate }
+            var info = stat()
+            // A regular file (a symbolic link to one is fine); a directory called `bw` is not `bw`.
+            if stat(candidate, &info) == 0, info.st_mode & S_IFMT == S_IFREG, access(candidate, X_OK) == 0 { return candidate }
         }
         return nil
     }

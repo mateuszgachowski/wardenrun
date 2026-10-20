@@ -23,6 +23,7 @@ private final class Rig: @unchecked Sendable {
     var audits: [AuditEvent] = []
     var saved: [ProtectedConfig] = []
     var askedDefaults: [String: String?] = [:]
+    var unavailableReason: String?
 
     func record(_ step: String) { lock.lock(); log_.append(step); lock.unlock() }
     func maybeFail(_ step: String) throws { if failAt == step { throw failure } }
@@ -60,6 +61,8 @@ private final class Rig: @unchecked Sendable {
             },
             configureBw: { [self] _ in record("configure"); try maybeFail("configure") },
             verify: { [self] _ in record("verify"); try maybeFail("verify") },
+            commitProfile: { [self] in record("commit"); try maybeFail("commit") },
+            discardProfile: { [self] in record("discard") },
             save: { [self] config in record("save"); try maybeFail("save"); saved.append(config) },
             audit: { [self] event in record("audit"); audits.append(event) })
     }
@@ -77,7 +80,7 @@ struct SetupFlowTests {
         let rig = Rig()
         let result = try SetupFlow.run(rig.steps())
         #expect(rig.log == ["existing", "ask:server", "ask:email", "ask:organization", "ask:collections", "password",
-                            "approve", "install", "configure", "verify", "save", "audit"])
+                            "approve", "install", "configure", "verify", "commit", "save", "audit", "discard"])
         #expect(result.contains("vault.example"))
         #expect(!result.contains("KNOWN"))
     }
@@ -103,12 +106,19 @@ struct SetupFlowTests {
         #expect(!rig.log.contains("approve") && !rig.log.contains("install") && !rig.log.contains("save"))
     }
 
-    @Test(arguments: [ApprovalDecision.denied, .timedOut, .unavailable(reason: "no Touch ID")])
+    @Test(arguments: [ApprovalDecision.denied, .timedOut])
     func aRefusedApprovalChangesNothing(decision: ApprovalDecision) {
         let rig = Rig()
         rig.decision = decision
         #expect(throws: SetupError.denied) { _ = try SetupFlow.run(rig.steps()) }
         #expect(rig.log.last == "approve", "nothing may run after a refusal: \(rig.log)")
+    }
+
+    @Test func noWayToAskAHumanSaysWhyAndChangesNothing() {
+        let rig = Rig()
+        rig.decision = .unavailable(reason: "no Touch ID")
+        #expect(throws: SetupError.approvalUnavailable(reason: "no Touch ID")) { _ = try SetupFlow.run(rig.steps()) }
+        #expect(rig.log.last == "approve")
     }
 
     @Test func aGateRefusalStopsTheFlow() {
@@ -119,12 +129,17 @@ struct SetupFlowTests {
         #expect(rig.log.last == "approve")
     }
 
-    @Test(arguments: ["install", "configure", "verify"])
-    func aFailingStepSavesNothingAndIsNotAudited(step: String) {
+    private struct StepFailure: Error, Equatable { let step: String }
+
+    @Test(arguments: ["install", "configure", "verify", "commit"])
+    func aFailingStepSavesNothingIsNotAuditedAndDiscardsTheStagedProfile(step: String) {
         let rig = Rig()
         rig.failAt = step
-        #expect(throws: SetupError.bwFailed(step: "login")) { _ = try SetupFlow.run(rig.steps()) }
+        rig.failure = StepFailure(step: step)
+        #expect(throws: StepFailure(step: step)) { _ = try SetupFlow.run(rig.steps()) }
         #expect(!rig.log.contains("save") && !rig.log.contains("audit"), "\(rig.log)")
+        #expect(rig.log.last == "discard", "the staged profile must be dropped on every way out: \(rig.log)")
+        if step != "commit" { #expect(!rig.log.contains("commit"), "the live profile is replaced only after verify: \(rig.log)") }
     }
 
     @Test func aFailingSaveIsNotAuditedAsDone() {
@@ -133,6 +148,20 @@ struct SetupFlowTests {
         rig.failure = StoreError.writeFailed(reason: "disk")
         #expect(throws: StoreError.writeFailed(reason: "disk")) { _ = try SetupFlow.run(rig.steps()) }
         #expect(!rig.log.contains("audit"))
+        #expect(rig.log.last == "discard")
+    }
+
+    @Test func theStagedProfileIsDiscardedAfterASuccessToo() throws {
+        let rig = Rig()
+        _ = try SetupFlow.run(rig.steps())
+        #expect(rig.log.last == "discard")
+    }
+
+    @Test func nothingIsStagedOrDiscardedBeforeApproval() {
+        let rig = Rig()
+        rig.decision = .denied
+        _ = try? SetupFlow.run(rig.steps())
+        #expect(!rig.log.contains("discard"))
     }
 
     @Test func cancellingAtAnyQuestionStopsTheFlow() {
@@ -187,12 +216,13 @@ struct SetupFlowTests {
         #expect(saved.httpsProxy == "http://proxy.example:3128")
     }
 
-    @Test func anUnreadableOldItemIsTreatedAsNoOldValue() throws {
+    @Test func anUnreadableOldItemIsSaidToBeReplacedAndHasNoOldValues() throws {
         let rig = Rig()
         rig.existingError = StoreError.unreadable(reason: "the item belongs to another build")
         _ = try SetupFlow.run(rig.steps())
         let text = try #require(rig.approvalTexts.first)
-        #expect(text.lowercased().contains("first setup"))
+        #expect(!text.lowercased().contains("first setup"), "an item exists; it must not be called a first setup")
+        #expect(text.contains("cannot read") && text.contains("replaced"))
         #expect(rig.log.contains("save"))
     }
 
