@@ -23,15 +23,17 @@ public protocol BwSignatureChecker: Sendable {
 /// Decides, before every run, whether the `bw` on disk is the one the maintainer pinned
 /// (DESIGN 5.2 rule 1). Anything else is refused.
 ///
+/// Only the signed GitHub-release `bw` can be pinned. Homebrew's build is `node` running
+/// `bw.js`, and that script loads about thirty packages, webpack chunks and wasm from beside it
+/// at run time, in a directory the user can write; a hash of `node` and `bw.js` would say
+/// "pinned" over code that nobody checked, and that code receives the master password.
+///
 /// This is a check at one moment, not a lock: the file can still be swapped between the check
 /// and the spawn by a process of the same user that may write it. The window is one run long.
 public enum BwBinaryPolicy {
     private static let missingBw = "pinned bw is missing or not an executable file"
-    private static let missingNodeOrScript = "pinned node or script is missing"
     private static let notCanonical = "pinned path is not canonical (a symlink?)"
     private static let bwDataBeside = "a bw-data directory sits beside the binary"
-    private static let nodeChanged = "node does not match its pinned hash"
-    private static let scriptChanged = "script does not match its pinned hash"
 
     public static func launchSpec(for pin: BwPin, signature: BwSignatureChecker) throws -> BwLaunchSpec {
         switch pin {
@@ -41,20 +43,6 @@ public enum BwBinaryPolicy {
             try signature.check(path: resolved.path, teamID: teamID)
             return BwLaunchSpec(executable: resolved.path, leadingArguments: [],
                                 pinnedDirectories: [directory(of: resolved.path)])
-        case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
-            let node = try resolveExecutable(nodePath, missing: missingNodeOrScript)
-            guard let scriptReal = ExecResolver.realPath(scriptPath), isRegularFile(scriptReal) else {
-                throw BwError.binaryNotAllowed(reason: missingNodeOrScript)
-            }
-            guard scriptReal == scriptPath else { throw BwError.binaryNotAllowed(reason: notCanonical) }
-            guard node.sha256 == nodeSHA256.lowercased() else { throw BwError.binaryNotAllowed(reason: nodeChanged) }
-            guard let scriptHash = try? FileHash.sha256(ofFileAt: scriptPath) else {
-                throw BwError.binaryNotAllowed(reason: missingNodeOrScript)
-            }
-            guard scriptHash == scriptSHA256.lowercased() else { throw BwError.binaryNotAllowed(reason: scriptChanged) }
-            try refuseBwData(besideAnyOf: [directory(of: node.path), directory(of: scriptPath)])
-            return BwLaunchSpec(executable: node.path, leadingArguments: [scriptPath],
-                                pinnedDirectories: [directory(of: node.path)])
         }
     }
 
@@ -67,11 +55,6 @@ public enum BwBinaryPolicy {
         }
         guard resolved.path == path else { throw BwError.binaryNotAllowed(reason: notCanonical) }
         return resolved
-    }
-
-    private static func isRegularFile(_ path: String) -> Bool {
-        var info = stat()
-        return stat(path, &info) == 0 && info.st_mode & S_IFMT == S_IFREG
     }
 
     private static func directory(of path: String) -> String { (path as NSString).deletingLastPathComponent }

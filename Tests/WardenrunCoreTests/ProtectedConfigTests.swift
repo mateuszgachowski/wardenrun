@@ -43,12 +43,8 @@ struct ProtectedConfigTests {
         #expect(config.httpsProxy == nil)
     }
 
-    @Test func roundTripKeepsEveryFieldForBothPinKinds() throws {
-        let pins: [BwPin] = [
-            .signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw"),
-            .nodeScript(nodePath: "/opt/node/bin/node", nodeSHA256: Self.hash,
-                        scriptPath: "/opt/bw/bw.js", scriptSHA256: String(repeating: "cd", count: 32)),
-        ]
+    @Test func roundTripKeepsEveryField() throws {
+        let pins: [BwPin] = [.signedRelease(teamID: "LTZ2PFU5D6", path: "/opt/wardenrun/bw")]
         for pin in pins {
             let original = try ProtectedConfig(
                 serverURL: try #require(URL(string: "https://vault.example")), accountEmail: "a@b.example",
@@ -150,26 +146,14 @@ struct ProtectedConfigTests {
         }
     }
 
-    @Test func pinnedPathsMustBeAbsolute() {
-        for (key, other) in [("node_path", "script_path"), ("script_path", "node_path")] {
-            for bad in ["node", "./node", "", "~/bin/node"] {
-                #expect(throws: ConfigError.invalidValue(key)) {
-                    try ProtectedConfig.decode(from: blob {
-                        $0["bw_pin"] = ["kind": "node_script", key: bad, other: "/ok/path",
-                                        "node_sha256": Self.hash, "script_sha256": Self.hash]
-                    })
-                }
-            }
+    @Test func theNodeBuildOfBwIsNotAcceptedAsAPin() {
+        // `bw.js` loads node_modules, chunk files and wasm that no hash of `node` + `bw.js` covers.
+        #expect(throws: ConfigError.malformed) {
+            try ProtectedConfig.decode(from: blob {
+                $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": Self.hash,
+                                "script_path": "/s", "script_sha256": Self.hash]
+            })
         }
-    }
-
-    @Test func upperCaseHashesAreAcceptedAndStoredInLowerCase() throws {
-        let upper = String(repeating: "AB", count: 32)
-        let config = try ProtectedConfig.decode(from: blob {
-            $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": upper,
-                            "script_path": "/s", "script_sha256": upper]
-        })
-        #expect(config.bwPin == .nodeScript(nodePath: "/n", nodeSHA256: Self.hash, scriptPath: "/s", scriptSHA256: Self.hash))
     }
 
     @Test func aMasterPasswordThatIsNotUTF8IsRejectedInsteadOfSilentlyChanged() throws {
@@ -194,23 +178,6 @@ struct ProtectedConfigTests {
     @Test func rejectsEmptyCollectionsAndAnEmptyPassword() {
         #expect(throws: ConfigError.emptyCollections) { try ProtectedConfig.decode(from: blob { $0["collection_ids"] = [String]() }) }
         #expect(throws: ConfigError.missingField("master_password")) { try ProtectedConfig.decode(from: blob { $0["master_password"] = "" }) }
-    }
-
-    @Test func rejectsPinnedHashesThatAreNotSHA256Hex() {
-        for bad in ["abc", String(repeating: "g", count: 64), String(repeating: "ab", count: 33)] {
-            #expect(throws: ConfigError.invalidHash("node_sha256")) {
-                try ProtectedConfig.decode(from: blob {
-                    $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": bad,
-                                    "script_path": "/s", "script_sha256": Self.hash]
-                })
-            }
-            #expect(throws: ConfigError.invalidHash("script_sha256")) {
-                try ProtectedConfig.decode(from: blob {
-                    $0["bw_pin"] = ["kind": "node_script", "node_path": "/n", "node_sha256": Self.hash,
-                                    "script_path": "/s", "script_sha256": bad]
-                })
-            }
-        }
     }
 
     @Test func rejectsGarbage() {

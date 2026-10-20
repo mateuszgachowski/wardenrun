@@ -5,8 +5,6 @@ public enum BwPin: Equatable, Sendable {
     /// The signed GitHub-release binary at this absolute path, checked against a code
     /// requirement on this team before every run.
     case signedRelease(teamID: String, path: String)
-    /// Homebrew's Node build: absolute paths of `node` and the script, with their SHA-256.
-    case nodeScript(nodePath: String, nodeSHA256: String, scriptPath: String, scriptSHA256: String)
 }
 
 public enum ConfigError: Error, Equatable {
@@ -19,7 +17,6 @@ public enum ConfigError: Error, Equatable {
     /// The named field is present but not acceptable (shape, encoding or an absolute-path rule).
     case invalidValue(String)
     case emptyCollections
-    case invalidHash(String)
     case malformed
 }
 
@@ -60,13 +57,6 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
             guard Self.isTeamID(teamID) else { throw ConfigError.invalidValue("team_id") }
             guard Self.isAbsolutePath(path) else { throw ConfigError.invalidValue("path") }
             checkedPin = bwPin
-        case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
-            guard Self.isAbsolutePath(nodePath) else { throw ConfigError.invalidValue("node_path") }
-            guard Self.isSHA256Hex(nodeSHA256) else { throw ConfigError.invalidHash("node_sha256") }
-            guard Self.isAbsolutePath(scriptPath) else { throw ConfigError.invalidValue("script_path") }
-            guard Self.isSHA256Hex(scriptSHA256) else { throw ConfigError.invalidHash("script_sha256") }
-            checkedPin = .nodeScript(nodePath: nodePath, nodeSHA256: nodeSHA256.lowercased(),
-                                     scriptPath: scriptPath, scriptSHA256: scriptSHA256.lowercased())
         }
         self.serverURL = checkedURL
         self.accountEmail = accountEmail
@@ -85,10 +75,6 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
         switch bwPin {
         case .signedRelease(let teamID, let path):
             pin = .object([("kind", .string("signed_release")), ("team_id", .string(teamID)), ("path", .string(path))])
-        case .nodeScript(let nodePath, let nodeSHA256, let scriptPath, let scriptSHA256):
-            pin = .object([("kind", .string("node_script")), ("node_path", .string(nodePath)),
-                           ("node_sha256", .string(nodeSHA256)), ("script_path", .string(scriptPath)),
-                           ("script_sha256", .string(scriptSHA256))])
         }
         var members: [(String, SecretJSONValue)] = [
             ("version", .integer(Self.currentVersion)),
@@ -211,10 +197,6 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
         isDigit(byte) || (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "F")) || (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "f"))
     }
 
-    private static func isSHA256Hex(_ text: String) -> Bool {
-        text.utf8.count == 64 && Hex.decode(text) != nil
-    }
-
     /// What the blob says, field by field, before any validation.
     private struct RawConfig {
         var version: Int?
@@ -294,12 +276,6 @@ public struct ProtectedConfig: CustomStringConvertible, CustomDebugStringConvert
             case "signed_release":
                 guard let team = fields["team_id"], let path = fields["path"] else { throw ConfigError.malformed }
                 return .signedRelease(teamID: team, path: path)
-            case "node_script":
-                guard let nodePath = fields["node_path"], let nodeHash = fields["node_sha256"],
-                      let scriptPath = fields["script_path"], let scriptHash = fields["script_sha256"] else {
-                    throw ConfigError.malformed
-                }
-                return .nodeScript(nodePath: nodePath, nodeSHA256: nodeHash, scriptPath: scriptPath, scriptSHA256: scriptHash)
             default:
                 throw ConfigError.malformed
             }
