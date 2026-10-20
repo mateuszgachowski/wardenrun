@@ -189,3 +189,12 @@ struct ApprovalGateTests {
         }
     }
 }
+
+struct GateRefusalMessageTests {
+    @Test func everyRefusalHasAFixedHumanSentence() {
+        #expect(GateRefusal.anotherApprovalPending.message == "another approval is waiting for an answer right now")
+        #expect(GateRefusal.lockedOut(secondsLeft: 42).message == "too many refused approvals; try again in 42 seconds")
+        #expect(GateRefusal.lockedOut(secondsLeft: 1).message == "too many refused approvals; try again in 1 second")
+        #expect(GateRefusal.stateUnavailable.message == "the approval state directory cannot be used, so nothing was asked")
+    }
+}

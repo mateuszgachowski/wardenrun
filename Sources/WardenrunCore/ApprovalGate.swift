@@ -108,3 +108,14 @@ public final class ApprovalGate: @unchecked Sendable {
         if written == data.count { rename(temporary, path) } else { unlink(temporary) }
     }
 }
+
+extension GateRefusal {
+    /// One fixed sentence per refusal; only the number of seconds varies.
+    public var message: String {
+        switch self {
+        case .anotherApprovalPending: return "another approval is waiting for an answer right now"
+        case .lockedOut(let seconds): return "too many refused approvals; try again in \(seconds) second\(seconds == 1 ? "" : "s")"
+        case .stateUnavailable: return "the approval state directory cannot be used, so nothing was asked"
+        }
+    }
+}

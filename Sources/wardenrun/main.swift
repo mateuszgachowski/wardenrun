@@ -4,7 +4,8 @@ import WardenrunCore
 #if canImport(Darwin)
 import WardenrunMac
 
-// Exit codes: 0 done, 1 doctor found a failure, 64 bad command line, 70 not implemented yet,
+// Exit codes: 0 done, 1 doctor found a failure or setup failed, 64 bad command line or no terminal,
+// 70 not implemented yet,
 // 77 not approved (run/new), 78 refused to start in an unsafe state.
 
 func say(_ text: String) { FileHandle.standardOutput.write(Data((text + "\n").utf8)) }
@@ -60,10 +61,11 @@ case .doctor:
                                   paths: WardenrunPaths(home: homeDirectory()))
     FileHandle.standardOutput.write(Data(report.render().utf8))
     exit(report.exitCode)
-case .setup:
+case .setup(let options):
     refuseUnlessSafe()
-    complain("setup is not implemented yet")
-    exit(70)
+    exit(SetupCommand.run(options: options, environment: environment, paths: WardenrunPaths(home: homeDirectory()),
+                          store: KeychainAclStore(), output: say,
+                          errorOutput: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }))
 case .run, .new:
     refuseUnlessSafe()
     complain("this command is not implemented yet")
