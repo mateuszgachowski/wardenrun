@@ -13,7 +13,7 @@ public struct BwItemRef: Equatable, Sendable {
     public let range: Range<Int>
 }
 
-private func isKey(_ key: [UInt8], _ word: StaticString) -> Bool {
+func isKey(_ key: [UInt8], _ word: StaticString) -> Bool {
     key.count == word.utf8CodeUnitCount && word.withUTF8Buffer { key.elementsEqual($0) }
 }
 
