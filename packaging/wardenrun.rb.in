@@ -1,0 +1,37 @@
+# Rendered by scripts/render-formula.sh at release time; the release workflow commits the
+# result to the tap repository. Do not edit the rendered copy by hand.
+class Wardenrun < Formula
+  desc "Let an AI coding agent use a Vaultwarden secret without being handed it"
+  homepage "https://github.com/mateuszgachowski/wardenrun"
+  url "https://github.com/mateuszgachowski/wardenrun/releases/download/v@VERSION@/@ASSET@"
+  sha256 "@SHA256@"
+  license "MIT"
+
+  depends_on :macos
+
+  # The binary is signed. Stripping it would break the signature, and with it the keychain
+  # item that only this signature may open.
+  skip_clean "bin/wardenrun"
+
+  def install
+    bin.install "wardenrun"
+  end
+
+  def caveats
+    <<~EOS
+      wardenrun needs the official Bitwarden CLI (bw): the signed binary from
+      Bitwarden's GitHub releases. Homebrew's bitwarden-cli is a Node script, which
+      wardenrun refuses.
+
+      Next:  wardenrun setup     (once, at a terminal)
+      Check: wardenrun doctor    (also prints who signed this binary)
+    EOS
+  end
+
+  test do
+    assert_match "wardenrun @VERSION@", shell_output("#{bin}/wardenrun version")
+    system "/usr/bin/codesign", "--verify", "--strict", bin/"wardenrun"
+    requirement = shell_output("/usr/bin/codesign -d -r- #{bin}/wardenrun 2>&1")
+    assert_match "H\"@CERT_SHA1@\"", requirement
+  end
+end

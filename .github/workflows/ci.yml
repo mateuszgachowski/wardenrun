@@ -21,6 +21,8 @@ jobs:
         run: sh scripts/test-check-workflows.sh
       - name: Workflow lint
         run: sh scripts/check-workflows.sh
+      - name: Formula renderer tests
+        run: sh scripts/test-render-formula.sh
 
   swift-macos:
     runs-on: macos-15
