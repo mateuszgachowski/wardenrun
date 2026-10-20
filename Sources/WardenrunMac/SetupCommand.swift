@@ -41,7 +41,7 @@ public enum SetupCommand {
                     return try Terminal.readHidden(prompt: "Master password (hidden, not stored anywhere else): ")
                 } catch TerminalError.notInteractive {
                     throw SetupError.notInteractive
-                } catch TerminalError.tooLong {
+                } catch TerminalError.tooLong, TerminalError.controlCharacter {
                     throw SetupError.invalid(field: "password")
                 } catch {
                     throw SetupError.cancelled
@@ -86,7 +86,7 @@ public enum SetupCommand {
             errorOutput("wardenrun: " + error.message)
             switch error {
             case .notInteractive: return 64
-            case .denied: return 77
+            case .denied, .approvalUnavailable: return 77
             default: return 1
             }
         } catch let refusal as GateRefusal {

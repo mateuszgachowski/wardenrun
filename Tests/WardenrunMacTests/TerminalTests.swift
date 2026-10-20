@@ -103,6 +103,41 @@ struct TerminalTests {
         #expect(text(try Terminal.readHidden(from: pty.slave, to: pty.slave, prompt: "")) == "abc")
     }
 
+    @Test func aLoneEscapeDoesNotSwallowTheKeyAfterIt() throws {
+        let pty = try Pty()
+        pty.typeWhenReady(Array("ab".utf8) + [0x1B] + Array("c\n".utf8))
+        #expect(text(try Terminal.readHidden(from: pty.slave, to: pty.slave, prompt: "")) == "abc")
+    }
+
+    @Test func aLoneEscapeAtTheEndOfTheLineIsDroppedAndTheLineStillEnds() throws {
+        let pty = try Pty()
+        pty.typeWhenReady(Array("ab".utf8) + [0x1B])
+        Thread.detachNewThread { usleep(400_000); pty.type([0x0A]) }
+        #expect(text(try Terminal.readHidden(from: pty.slave, to: pty.slave, prompt: "")) == "ab")
+    }
+
+    @Test func anEscapeFollowedByBackspaceStillBacksUp() throws {
+        let pty = try Pty()
+        pty.typeWhenReady(Array("ab".utf8) + [0x1B, 0x7F] + Array("c\n".utf8))
+        #expect(text(try Terminal.readHidden(from: pty.slave, to: pty.slave, prompt: "")) == "ac")
+    }
+
+    @Test func controlUClearsTheWholeLine() throws {
+        let pty = try Pty()
+        pty.typeWhenReady(Array("wrong".utf8) + [0x15] + Array("right\n".utf8))
+        #expect(text(try Terminal.readHidden(from: pty.slave, to: pty.slave, prompt: "")) == "right")
+    }
+
+    @Test func tabAndOtherControlKeysAreRefusedNotSilentlyDropped() throws {
+        for key: UInt8 in [0x09, 0x01, 0x1A, 0x00, 0x1C] {
+            let pty = try Pty()
+            pty.typeWhenReady(Array("ab".utf8) + [key] + Array("c\n".utf8))
+            #expect(throws: TerminalError.controlCharacter, "key \(key)") {
+                try Terminal.readHidden(from: pty.slave, to: pty.slave, prompt: "")
+            }
+        }
+    }
+
     @Test func termiosIsRestoredAfterSuccessEOFAndErrors() throws {
         let pty = try Pty()
         let original = pty.flags()

@@ -160,10 +160,12 @@ wardenrun and goes nowhere except the places on this page:
       the copy's signature is checked against Bitwarden's before it is used
   (d) password ──▶ `bw login` through an inherited pipe (/dev/fd/3): not in an
       argument, not in an environment variable, not in a file
-      bw ◀──HTTPS──▶ Vaultwarden, leaves login tokens in wardenrun's bw folder
+      bw ◀──HTTPS──▶ Vaultwarden, leaves login tokens in a STAGED bw folder
   (e) proof: bw serve unlocks with the password and locks again, nothing read
-  (f) only now: settings + password ──▶ the one keychain item
-      (a failure at (c), (d) or (e) leaves the keychain item as it was)
+  (f) only now: the staged bw folder replaces the working one, and
+      settings + password ──▶ the one keychain item
+      (a failure at (c), (d) or (e) leaves the keychain item and the working
+      bw folder as they were; the staged folder is deleted)
   (g) one audit-log line: "setup", no values
 ```
 
@@ -172,6 +174,7 @@ wardenrun and goes nowhere except the places on this page:
 | typing | The password, keystroke by keystroke, into a locked buffer: no `String`, no echo | No (the terminal itself is outside wardenrun's control) |
 | (b) | Old and new settings in the sheet text | No, it is drawn by macOS. Only a yes or a no comes back. |
 | (d) | The password and a newline, through a pipe that only `bw login` inherits | No, with the same caveat as step 4 of `run`: pipe buffers in the kernel are outside what wardenrun can zero |
+| (c) | A copy of `bw`; before every later use the process that actually runs is checked against Bitwarden's signature again | A same-user program can replace the copy; the live check refuses and kills a `bw` that is not Bitwarden's. It does not catch an older, genuinely Bitwarden-signed `bw`. |
 | (f) | Settings and password into the keychain item | Not by programs with a different signature |
 
 ### Words used above
@@ -222,12 +225,19 @@ Before the first `run`, a human does this once:
    `bw` program) next to the old ones, and never the password. Nothing has changed up to this
    point. If you refuse, nothing changes at all.
 6. After your touch, `setup` copies `bw` into wardenrun's own folder
-   (`~/.config/wardenrun/bin/bw`, a folder only you can enter) **after checking the copy's
-   signature against Bitwarden's**; logs that copy in to your server with the password
-   (over an inherited pipe: not in an argument, not in an environment variable, not in a file);
-   unlocks and locks once to prove that the password and the account belong together; and
-   **only then** writes the keychain item. If any step fails, the keychain item is untouched
-   (the `bw` profile may be logged out; run `setup` again).
+   (`~/.config/wardenrun/bin/bw`, a folder with mode `0700`) **after checking the copy's
+   signature against Bitwarden's**. Another program of yours can still replace that copy
+   later, which is why the process that is actually running is checked against Bitwarden's
+   signature again before `bw` gets its first instruction, on every use (a wrong one is killed); logs that copy in to your server with the password
+   (over an inherited pipe: not in an argument, not in an environment variable, not in a file)
+   into a **staged** profile folder next to the real one; unlocks and locks once to prove that
+   the password and the account belong together; and **only then** swaps the staged profile
+   in and writes the keychain item. If any step fails, the keychain item **and** the working
+   `bw` profile are untouched and the staged folder is deleted: run `setup` again.
+
+   The dedicated account must be able to log in with the password alone: an account with
+   two-step login is not supported yet. wardenrun makes no network call of its own, so it also
+   does not check whether Bitwarden has revoked its signing certificate.
 
 From then on the master password travels only as in steps 3 and 4 above.
 
@@ -248,7 +258,7 @@ if any line says `FAIL`, 0 otherwise (a `warn` does not fail it). The checks:
 | `certificate` | Who signed this binary (compare with the hash published at release) |
 | `touch-id` | Touch ID can be used right now (`ok`), or the reason it cannot (`FAIL`) |
 | `protected-item` | The keychain item is readable by this binary (`ok`, with the number of collections), does not exist yet (`info`) or cannot be read (`FAIL`: another signer, or damaged) |
-| `bw-pin`, `bw-version`, `bw-profile` | The pinned `bw` still carries Bitwarden's signature (`FAIL` if not); its version, marked `untested` unless it is the one wardenrun was tested with (2026.10.x); whether wardenrun's own `bw` profile exists yet. Reading the version starts `bw` once: no vault, no network. |
+| `bw-pin`, `bw-version`, `bw-profile` | The pinned `bw` still carries Bitwarden's signature (`FAIL` if not); its version, marked `untested` unless it is the one wardenrun was developed against (2026.10.x); whether wardenrun's own `bw` profile exists yet. Reading the version starts `bw` once: no vault, no network. |
 
 ## What wardenrun can reach, and what it cannot
 
@@ -277,7 +287,7 @@ dedicated account and the advice below.
 
 | Where | What is in it | How long |
 |-------|---------------|----------|
-| **One macOS login-keychain item** | The master password of the dedicated account, the server address, the account name, the organization and allowed collection, and the identity of the `bw` program wardenrun trusts. Only programs signed with wardenrun's certificate can read it. It is written last by `setup`, after the login worked. | Until you remove it or run `wardenrun setup` again |
+| **One macOS login-keychain item** | The master password of the dedicated account, the server address, the account name, the organization and allowed collection, and the identity of the `bw` program wardenrun trusts. Only programs signed with wardenrun's certificate can read it. It is written last by `setup`, after the login worked. Saving over an existing item deletes it and writes a new one, so an item someone else planted with a looser access list is never reused; macOS may then ask for your login-keychain password once. Answer only a dialog you started. | Until you remove it or run `wardenrun setup` again |
 | **`~/.config/wardenrun/bin/bw`** | A copy of the official `bw` release, made by `setup` after its signature was checked (and checked again at that path). The folder is mode `0700`. It is code, not a secret. | Until you delete it or run `setup` again |
 | **`~/.config/wardenrun/state/`**, **`bw.lock`** | Files for the approval limit (one sheet at a time; a short lock-out after repeated refusals: times of recent refusals, no names) and the lock that keeps two wardenruns from using `bw` at once. | Until you delete them. Deleting them also lifts the lock-out: this limit slows a pestering agent, it is not a barrier against one that can delete files. |
 | **`~/.config/wardenrun/bw/`** | wardenrun's *own* `bw` profile: login tokens (**plain text**, mode `0600`; plus the API-key secret if you logged in with one) and, as far as is known, an encrypted copy of the vault and the wrapped vault key. Never your personal `bw` profile. | Until you delete it. An option logs out after every run. |
@@ -297,8 +307,12 @@ from approving something harmful, and it does not defend a Mac that is already c
 - **The fingerprint check is enforced by wardenrun, not by macOS.** macOS would, in practice, only enforce a
   per-read fingerprint for an app signed with a paid Apple developer account, and a
   command-line tool cannot carry that. wardenrun is free by design, so the gate is in its own
-  code, hardened against code injection (hardened runtime, no debugger attach, no core dumps,
-  refuses to start with `DYLD_*` set).
+  code, hardened against code injection (hardened runtime, which makes macOS drop `DYLD_*`
+  variables before wardenrun starts, no debugger attach, no core dumps; wardenrun also
+  refuses to start if it still sees one). `setup`, `run` and `new` refuse to start (exit 78)
+  from a release-mode build that lacks the hardened runtime, and when there is no screen
+  session; only a debug build from source (`swift build`) may run unhardened, and no
+  setting in the environment changes that, because the agent controls the environment.
 - **What macOS does enforce:** the keychain item opens only for a program signed with
   wardenrun's certificate. A different certificate, an ad-hoc signature or an unsigned copy is
   refused (tested). Bitwarden's own macOS desktop app protects its biometric unlock at the

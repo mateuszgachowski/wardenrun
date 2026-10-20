@@ -28,15 +28,50 @@ if printf '%s\n' "$output" | grep -Eq '^FAIL +(hardened-runtime|deny-attach|core
     exit 1
 fi
 
-# A DYLD_ variable is refused with 78 before anything is asked or stored.
+# The signed binary has the hardened runtime, so dyld drops DYLD_ variables before wardenrun
+# starts; wardenrun's own refusal (78) is the second line. Either way the variable must not get
+# through: the command stops at the missing terminal (64) or at the refusal (78), never further.
 status=0
 DYLD_FRAMEWORK_PATH=/nonexistent "$binary" setup </dev/null >/dev/null 2>&1 || status=$?
-[ "$status" -eq 78 ] || { echo "ci: expected exit 78 with DYLD_ set, got $status" >&2; exit 1; }
+case "$status" in
+    64|78) ;;
+    *) echo "ci: with DYLD_ set the signed binary exited $status, expected 64 or 78" >&2; exit 1 ;;
+esac
+dyld_output="$(DYLD_FRAMEWORK_PATH=/nonexistent "$binary" doctor || true)"
+if printf '%s\n' "$dyld_output" | grep -Eq '^ok +dyld-environment '; then
+    echo "ci: dyld dropped DYLD_FRAMEWORK_PATH before wardenrun started"
+else
+    printf '%s\n' "$dyld_output" | grep -Eq '^FAIL +dyld-environment ' || { echo "ci: doctor says nothing about dyld-environment" >&2; exit 1; }
+    echo "ci: wardenrun saw DYLD_FRAMEWORK_PATH and refuses (second line of defence)"
+fi
 
-# Without a terminal, setup refuses with 64 and reads nothing.
+# Without a terminal, setup refuses with 64 and reads nothing; on a runner without a
+# window-server session it refuses with 78 first, which doctor reports as graphic-session.
 status=0
 "$binary" setup </dev/null >/dev/null 2>&1 || status=$?
-[ "$status" -eq 64 ] || { echo "ci: expected exit 64 without a terminal, got $status" >&2; exit 1; }
+if printf '%s\n' "$output" | grep -Eq '^ok +graphic-session '; then
+    [ "$status" -eq 64 ] || { echo "ci: expected exit 64 without a terminal, got $status" >&2; exit 1; }
+else
+    [ "$status" -eq 78 ] || { echo "ci: expected exit 78 without a graphic session, got $status" >&2; exit 1; }
+fi
+
+# A debug build is not hardened and sees the variable: wardenrun refuses it with 78 itself.
+swift build
+status=0
+DYLD_FRAMEWORK_PATH=/nonexistent .build/debug/wardenrun setup </dev/null >/dev/null 2>&1 || status=$?
+[ "$status" -eq 78 ] || { echo "ci: expected exit 78 from a debug build with DYLD_ set, got $status" >&2; exit 1; }
+
+# A release build that is NOT signed with the hardened runtime refuses setup and run (78).
+unsigned_dir="$(mktemp -d)"
+cp "$binary" "$unsigned_dir/wardenrun"
+codesign --force --sign - "$unsigned_dir/wardenrun"
+status=0
+"$unsigned_dir/wardenrun" setup </dev/null >/dev/null 2>&1 || status=$?
+[ "$status" -eq 78 ] || { echo "ci: unhardened release build: setup exited $status, expected 78" >&2; exit 1; }
+status=0
+"$unsigned_dir/wardenrun" run item -- true </dev/null >/dev/null 2>&1 || status=$?
+[ "$status" -eq 78 ] || { echo "ci: unhardened release build: run exited $status, expected 78" >&2; exit 1; }
+rm -rf "$unsigned_dir"
 
 # A usage error is 64, help and version work.
 status=0
