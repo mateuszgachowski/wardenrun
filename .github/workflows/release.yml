@@ -1,0 +1,235 @@
+name: release
+
+# A tag push is the only trigger. This workflow holds the signing key and the tap token, so it
+# must never run for a pull request or by hand (scripts/check-workflows.sh enforces that).
+# Procedure, secrets and the manual checks: docs/RELEASING.md.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # Test, sign, verify. Nothing is published here: a failure anywhere in this job ends the release.
+  build:
+    runs-on: macos-15
+    # A keychain or Touch ID dialog cannot be answered on a runner; fail rather than hang.
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.info.outputs.version }}
+      asset: ${{ steps.info.outputs.asset }}
+      cert_sha1: ${{ steps.cert.outputs.sha1 }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select Xcode 16.2 (Swift 6.0.x, the minimum the package declares)
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: The tag must be the version in the source
+        id: info
+        run: |
+          set -eu
+          sh scripts/release-info.sh check-version "$GITHUB_REF_NAME"
+          version=$(sh scripts/release-info.sh print-version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=$(sh scripts/release-info.sh name "$version")" >> "$GITHUB_OUTPUT"
+      - name: Test
+        run: swift test
+      - name: Import the signing certificate into a temporary keychain
+        id: cert
+        env:
+          P12_BASE64: ${{ secrets.SIGNING_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          set -eu
+          [ -n "$P12_BASE64" ] || { echo "the signing certificate secret is not set" >&2; exit 1; }
+          [ -n "$P12_PASSWORD" ] || { echo "the signing certificate password secret is not set" >&2; exit 1; }
+          umask 077
+          p12="$RUNNER_TEMP/signing.p12"
+          trap 'rm -f "$p12"' EXIT
+          printf '%s' "$P12_BASE64" | tr -d ' \r\n' | base64 -D > "$p12"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          export KEYCHAIN_PASSWORD
+          sha1=$(sh scripts/import-signing-cert.sh "$p12" "$RUNNER_TEMP/wardenrun-signing.keychain-db")
+          [ "${#sha1}" -eq 40 ] || { echo "unexpected certificate hash" >&2; exit 1; }
+          case "$sha1" in *[!0-9a-f]*) echo "unexpected certificate hash" >&2; exit 1 ;; esac
+          echo "sha1=$sha1" >> "$GITHUB_OUTPUT"
+      - name: Build, sign and pack
+        id: pack
+        env:
+          SIGN_IDENTITY: ${{ steps.cert.outputs.sha1 }}
+          VERSION: ${{ steps.info.outputs.version }}
+          ASSET: ${{ steps.info.outputs.asset }}
+        run: |
+          set -eu
+          SIGN_KEYCHAIN="$RUNNER_TEMP/wardenrun-signing.keychain-db" sh scripts/package-release.sh "$VERSION"
+          echo "sha256=$(cut -d ' ' -f 1 "dist/$ASSET.sha256")" >> "$GITHUB_OUTPUT"
+      - name: Verify the binary that is inside the tarball
+        env:
+          CERT_SHA1: ${{ steps.cert.outputs.sha1 }}
+          VERSION: ${{ steps.info.outputs.version }}
+          ASSET: ${{ steps.info.outputs.asset }}
+        run: |
+          set -eu
+          check=$(mktemp -d "$RUNNER_TEMP/verify.XXXXXX")
+          tar -xzf "dist/$ASSET" -C "$check"
+          sh scripts/verify-release-binary.sh "$check/wardenrun" "$CERT_SHA1" "$VERSION"
+          (cd dist && shasum -a 256 -c "$ASSET.sha256")
+      - name: Keep the tarball and its checksum for the release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Delete the temporary keychain and the certificate file
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/signing.p12"
+          security delete-keychain "$RUNNER_TEMP/wardenrun-signing.keychain-db" >/dev/null 2>&1 || true
+
+  # Publishes. Runs only when the build job verified everything.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-dist
+          path: dist
+      - name: The files are the ones the build job made
+        env:
+          ASSET: ${{ needs.build.outputs.asset }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          set -eu
+          cd dist
+          sha256sum -c "$ASSET.sha256"
+          [ "$(cut -d ' ' -f 1 "$ASSET.sha256")" = "$SHA256" ]
+      - name: Attest the build provenance of the tarball
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/wardenrun-*-macos-universal.tar.gz
+      - name: Write the release notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          ASSET: ${{ needs.build.outputs.asset }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+          CERT_SHA1: ${{ needs.build.outputs.cert_sha1 }}
+        run: |
+          set -eu
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          wardenrun $VERSION for macOS 13 or later (Apple silicon and Intel). The binary is signed
+          with the project's self-signed certificate, not notarized by Apple.
+
+          Signing certificate SHA-1 (pin this): \`$CERT_SHA1\`
+          Tarball SHA-256: \`$SHA256\`
+
+          Verify before you run it:
+
+          \`\`\`
+          shasum -a 256 -c $ASSET.sha256
+          gh attestation verify $ASSET --repo $GITHUB_REPOSITORY
+          tar -xzf $ASSET wardenrun
+          codesign -d -r- ./wardenrun 2>&1 | grep '$CERT_SHA1'
+          \`\`\`
+          EOF
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          ASSET: ${{ needs.build.outputs.asset }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "wardenrun $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "dist/$ASSET" "dist/$ASSET.sha256"
+
+  # Updates the Homebrew tap when TAP_TOKEN is set; without it the job ends with a notice.
+  tap:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Render the formula and push it to the tap
+        id: publish
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+          CERT_SHA1: ${{ needs.build.outputs.cert_sha1 }}
+        run: |
+          set -eu
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::TAP_TOKEN is not set: the Homebrew tap was not updated"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The token goes into one HTTP header of the git commands below; it is not stored in
+          # the clone's configuration.
+          auth=$(printf 'x-access-token:%s' "$TAP_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          tap="$RUNNER_TEMP/tap"
+          git -c "http.extraHeader=Authorization: Basic $auth" clone --depth 1 \
+            "https://github.com/mateuszgachowski/homebrew-tap.git" "$tap"
+          mkdir -p "$tap/Formula"
+          sh scripts/render-formula.sh "$VERSION" "$SHA256" "$CERT_SHA1" > "$tap/Formula/wardenrun.rb"
+          cd "$tap"
+          git add Formula/wardenrun.rb
+          if git diff --cached --quiet; then
+            echo "the formula is unchanged"
+          else
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "wardenrun $VERSION"
+            git -c "http.extraHeader=Authorization: Basic $auth" push origin HEAD
+          fi
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+  # The release is already public here. If Homebrew's install breaks the signature, this job
+  # fails loudly: docs/RELEASING.md says what to do (yank the release, fix, new tag).
+  verify-install:
+    needs: [build, tap]
+    if: needs.tap.outputs.published == 'true'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Install from the tap and check the signature
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          CERT_SHA1: ${{ needs.build.outputs.cert_sha1 }}
+        run: |
+          set -eu
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew tap mateuszgachowski/tap
+          attempt=1
+          until brew install mateuszgachowski/tap/wardenrun; do
+            [ "$attempt" -lt 3 ] || { echo "brew install failed three times" >&2; exit 1; }
+            attempt=$((attempt + 1))
+            sleep 20
+            brew update >/dev/null || true
+          done
+          binary="$(brew --prefix)/bin/wardenrun"
+          codesign --verify --strict "$binary"
+          codesign -d -r- "$binary" 2>&1 | grep -F "H\"$CERT_SHA1\""
+          brew test mateuszgachowski/tap/wardenrun
+          "$binary" version | grep -Fx "wardenrun $VERSION"
+          # A runner has no window server, so graphic-session may FAIL: only the named lines count.
+          output=$("$binary" doctor || true)
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -Eq '^ok +hardened-runtime '
+          if printf '%s\n' "$output" | grep -Eq '^FAIL +(hardened-runtime|deny-attach|core-dumps) '; then
+            echo "a hardening check failed on the installed binary" >&2
+            exit 1
+          fi
