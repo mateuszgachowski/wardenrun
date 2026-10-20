@@ -23,7 +23,9 @@ wardenrun is **pre-release**. The design is written and approved
 `wardenrun new`, `wardenrun setup` and `wardenrun doctor`, on top of the engine that talks to `bw`
 and the macOS layer (keychain item, Touch ID approval, hardening). What has **not** happened yet:
 the tests against a real Vaultwarden server, a run of the whole thing with a real fingerprint on
-a real sensor, and a release. So there is no signed build and nothing to install, and the
+a real sensor, and a release. The release pipeline (signing in CI, verification of the binary,
+attestation, Homebrew formula) is written and its scripts are checked by a CI dry run, but **no
+release has been cut**: there is no signed build and nothing to install, and the
 sections below describe how wardenrun is **designed** to behave; each claim is checked against
 the code and the design before it is written down, and "tested" always says what was tested.
 
@@ -478,6 +480,14 @@ A secrets tool should be easy to audit. The design gives you these checks:
 - **The signing certificate hash** will be published here and in [`SECURITY.md`](SECURITY.md)
   with the first release. Check your install with `codesign -d -r- "$(command -v wardenrun)"`:
   the requirement it prints must contain that hash. A different hash means a different signer.
+- **Checksum and attestation of a release download** (instructions for after the first
+  release; there is nothing to download yet). Each release has a tarball, a `.sha256` file and
+  a GitHub artifact attestation that says which workflow run built the tarball:
+
+  ```sh
+  shasum -a 256 -c wardenrun-X.Y.Z-macos-universal.tar.gz.sha256
+  gh attestation verify wardenrun-X.Y.Z-macos-universal.tar.gz --repo mateuszgachowski/wardenrun
+  ```
 - **The audit log** is plain JSON lines: `tail -n 5 ~/Library/Logs/wardenrun/audit.jsonl`.
 - **The security-critical code is small and separated.** The platform-neutral core (masking,
   the `bw` driver, environment handling) lives in `Sources/WardenrunCore/`; the macOS parts

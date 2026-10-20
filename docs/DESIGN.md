@@ -519,17 +519,31 @@ a physically stolen unlocked Mac; the security of Vaultwarden/`bw` themselves.
   (`codesign -s <identity> -o runtime -i <fixed identifier>`), publishes a tarball with
   SHA-256 and a GitHub Artifact Attestation, and updates the formula in
   `mateuszgachowski/homebrew-tap`. The formula downloads the release tarball (no build on the
-  user's machine) and depends on the `bw` CLI. Install:
+  user's machine) and does **not** depend on Homebrew's `bitwarden-cli`: that package is a Node
+  script, which wardenrun refuses (README, Requirements). The formula's caveats tell the user to
+  install the signed `bw` from Bitwarden's GitHub releases and run `wardenrun setup`. Install:
   `brew install mateuszgachowski/tap/wardenrun`. Gatekeeper is not involved: a formula
   download made by `curl` carries no quarantine attribute (verified), which is also why a
   self-signed signature is enough.
-- **Certificate:** generated once with `openssl`, 10-year validity, private key stored as a
+- **Identifier and signature:** one fixed code-signing identifier
+  (`io.github.mateuszgachowski.wardenrun`), hardened runtime, no timestamp (the certificate is
+  self-signed). The binary reports the version in `Usage.swift`; a tag must equal it.
+- **Certificate:** generated once with `openssl` by the maintainer (procedure and the
+  PKCS#12 flags macOS can read are in `docs/RELEASING.md`), 10-year validity, private key stored as a
   CI secret plus one offline backup; the SHA-1 of the certificate is the identity pinned in
   every user's keychain ACL, so it is published in the README and in `SECURITY.md`.
-- **Release check that must be automated:** after `brew install`, `codesign -d -r-` must
-  still print the project's designated requirement. Homebrew can re-sign or patch binaries
-  in some install paths; if it does, the ACL no longer matches and the install is broken.
-  This has not been tested yet and is the first thing PR6 verifies.
+- **Release check, automated:** the `verify-install` job of `release.yml` runs after the tap
+  was updated: `brew install`, then `codesign -d -r-` must contain the pinned certificate
+  SHA-1, `brew test`, and `wardenrun doctor` must show `ok` for `hardened-runtime`. Homebrew
+  can re-sign or patch binaries in some install paths; if it does, the ACL no longer matches
+  and the install is broken. The job runs **after** publishing, so it fails loudly rather than
+  blocking: the runbook (`docs/RELEASING.md`, section 5) says to yank the release and tag a
+  fixed one. That Homebrew leaves the signature alone is still unproven until the first
+  release runs it.
+- **What stops a release:** the tag differs from the version constant, a test fails, the
+  signature does not verify, the hardened-runtime flag is missing, a slice is missing from the
+  universal binary, or the designated requirement does not name the pinned certificate. All
+  of that is checked in the `build` job; nothing is published until it is clean.
 - Apple Silicon and Intel are both first-class (Intel Macs with a T2 chip have Touch ID too).
 - Version pinning of `bw`: the formula declares the tested range; `doctor` warns outside it.
 
@@ -573,7 +587,9 @@ LICENSE (MIT), README.md, SECURITY.md
 4. macOS: Tier B store, approver, hardening, `doctor`, `setup`.
 5. `run` and `new` end to end.
 6. Release pipeline (self-signed certificate, signing in CI, attestation), tap, check that
-   the signature survives `brew install`, README final, maintainer install test.
+   the signature survives `brew install`, README final, maintainer install test. The pipeline
+   is `release.yml` with its scripts; the certificate, the secrets, the manual checklist and
+   the first tag are the maintainer's (`docs/RELEASING.md`).
 
 Not planned: a Tier A (Developer ID, `.app`, cask) backend. The `SecretStore` protocol keeps
 the door open for a contributor who has a paid account.

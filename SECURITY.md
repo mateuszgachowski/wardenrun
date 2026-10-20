@@ -4,8 +4,9 @@ wardenrun is a security tool, so reports are welcome and taken seriously.
 
 ## Status and supported versions
 
-wardenrun is **pre-release**: there is no released version yet, so there is nothing to
-patch and no version is "supported" in the usual sense. Design-level reports are just as
+wardenrun is **pre-release**: the release pipeline exists
+([`docs/RELEASING.md`](docs/RELEASING.md)) but **no release has been cut**, so there is nothing
+to patch and no version is "supported" in the usual sense. Design-level reports are just as
 useful as bug reports right now. The approved design and its known gaps are in
 [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md);
 please read the "Not protected" rows before reporting something that is already listed there.
@@ -24,14 +25,16 @@ best-effort basis: this is a free project maintained by one person.
 Releases are signed with a self-signed code-signing certificate, so that the keychain item
 wardenrun creates keeps working across upgrades. The certificate hash will be published here
 and in the README **together with the first release**. A different hash means the binary was
-not signed by this project.
+not signed by this project. Each release also carries a GitHub artifact attestation and a
+`.sha256` file; how they are made and checked is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 If the signing key is ever leaked, or a malicious release is published, the rotation is:
 
 1. A security advisory is published and the old certificate hash is marked revoked here.
-2. A new certificate is generated and a new release is signed with it.
+2. A new certificate is generated and a new release is signed with it
+   ([`docs/RELEASING.md`](docs/RELEASING.md), sections 1 and 6).
 3. Everyone re-runs `wardenrun setup` (the old keychain item cannot be read by the new
-   binary, by design).
+   binary, by design) and checks the new hash against this file.
 
 ## What is in scope
 
