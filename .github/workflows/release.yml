@@ -2,7 +2,14 @@ name: release
 
 # A tag push is the only trigger. This workflow holds the signing key and the tap token, so it
 # must never run for a pull request or by hand (scripts/check-workflows.sh enforces that).
-# Procedure, secrets and the manual checks: docs/RELEASING.md.
+# Procedure, secrets, repository settings and the manual checks: docs/RELEASING.md.
+#
+# The jobs are split by what they may see:
+#   build         runs the tests and the Swift build, which execute repository code; no secrets
+#   sign          holds the signing key; runs shell scripts and codesign only, no Swift, no tests
+#   release       publishes the verified tarball (GITHUB_TOKEN only)
+#   tap           holds the tap token; renders the formula first, then only runs git
+#   verify-install  installs from the tap and checks the signature (no secrets)
 on:
   push:
     tags: ['v*']
@@ -11,7 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  # Test, sign, verify. Nothing is published here: a failure anywhere in this job ends the release.
+  # Test and build, unsigned. Runs the Swift toolchain and the tests: nothing secret is here.
   build:
     runs-on: macos-15
     # A keychain or Touch ID dialog cannot be answered on a runner; fail rather than hang.
@@ -19,11 +26,10 @@ jobs:
     outputs:
       version: ${{ steps.info.outputs.version }}
       asset: ${{ steps.info.outputs.asset }}
-      cert_sha1: ${{ steps.cert.outputs.sha1 }}
-      sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Select Xcode 16.2 (Swift 6.0.x, the minimum the package declares)
         run: sudo xcode-select -s /Applications/Xcode_16.2.app
@@ -35,8 +41,47 @@ jobs:
           version=$(sh scripts/release-info.sh print-version)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "asset=$(sh scripts/release-info.sh name "$version")" >> "$GITHUB_OUTPUT"
+      - name: The tagged commit must be on main
+        run: |
+          set -eu
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "the tagged commit is not on main: a release is cut from main only" >&2; exit 1; }
       - name: Test
         run: swift test
+      - name: The tests leave the tree as they found it
+        run: |
+          set -eu
+          [ -z "$(git status --porcelain)" ] || { git status --short >&2; echo "the tests changed the working tree" >&2; exit 1; }
+      - name: Build the universal binary (unsigned)
+        run: sh scripts/build-release-binary.sh "$RUNNER_TEMP/unsigned"
+      - name: Keep the unsigned binary for the sign job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-binary
+          path: ${{ runner.temp }}/unsigned/wardenrun
+          if-no-files-found: error
+          retention-days: 1
+
+  # Signs and verifies. The only job that holds the signing key. It runs no Swift and no tests:
+  # the keychain is unlocked only while codesign runs, and is deleted before anything else
+  # touches the signed binary.
+  sign:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 20
+    environment: release
+    outputs:
+      cert_sha1: ${{ steps.cert.outputs.sha1 }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Take the unsigned binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-binary
+          path: unsigned
       - name: Import the signing certificate into a temporary keychain
         id: cert
         env:
@@ -51,26 +96,35 @@ jobs:
           trap 'rm -f "$p12"' EXIT
           printf '%s' "$P12_BASE64" | tr -d ' \r\n' | base64 -D > "$p12"
           KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
           export KEYCHAIN_PASSWORD
           sha1=$(sh scripts/import-signing-cert.sh "$p12" "$RUNNER_TEMP/wardenrun-signing.keychain-db")
           [ "${#sha1}" -eq 40 ] || { echo "unexpected certificate hash" >&2; exit 1; }
           case "$sha1" in *[!0-9a-f]*) echo "unexpected certificate hash" >&2; exit 1 ;; esac
           echo "sha1=$sha1" >> "$GITHUB_OUTPUT"
-      - name: Build, sign and pack
+      - name: The certificate must be the one that is pinned in the repository
+        env:
+          CERT_SHA1: ${{ steps.cert.outputs.sha1 }}
+        run: sh scripts/release-info.sh check-cert-pin "$CERT_SHA1"
+      - name: Sign and pack
         id: pack
         env:
           SIGN_IDENTITY: ${{ steps.cert.outputs.sha1 }}
-          VERSION: ${{ steps.info.outputs.version }}
-          ASSET: ${{ steps.info.outputs.asset }}
+          VERSION: ${{ needs.build.outputs.version }}
+          ASSET: ${{ needs.build.outputs.asset }}
         run: |
           set -eu
-          SIGN_KEYCHAIN="$RUNNER_TEMP/wardenrun-signing.keychain-db" sh scripts/package-release.sh "$VERSION"
+          SIGN_KEYCHAIN="$RUNNER_TEMP/wardenrun-signing.keychain-db" sh scripts/sign-release.sh unsigned/wardenrun "$VERSION"
           echo "sha256=$(cut -d ' ' -f 1 "dist/$ASSET.sha256")" >> "$GITHUB_OUTPUT"
+      - name: Delete the signing keychain and the certificate file now
+        run: |
+          rm -f "$RUNNER_TEMP/signing.p12"
+          security delete-keychain "$RUNNER_TEMP/wardenrun-signing.keychain-db"
       - name: Verify the binary that is inside the tarball
         env:
           CERT_SHA1: ${{ steps.cert.outputs.sha1 }}
-          VERSION: ${{ steps.info.outputs.version }}
-          ASSET: ${{ steps.info.outputs.asset }}
+          VERSION: ${{ needs.build.outputs.version }}
+          ASSET: ${{ needs.build.outputs.asset }}
         run: |
           set -eu
           check=$(mktemp -d "$RUNNER_TEMP/verify.XXXXXX")
@@ -84,15 +138,15 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
-      - name: Delete the temporary keychain and the certificate file
+      - name: Make sure the keychain and the certificate file are gone
         if: always()
         run: |
           rm -f "$RUNNER_TEMP/signing.p12"
           security delete-keychain "$RUNNER_TEMP/wardenrun-signing.keychain-db" >/dev/null 2>&1 || true
 
-  # Publishes. Runs only when the build job verified everything.
+  # Publishes. Runs only when the sign job verified everything.
   release:
-    needs: build
+    needs: [build, sign]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -100,14 +154,17 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-dist
           path: dist
-      - name: The files are the ones the build job made
+      - name: The files are the ones the sign job made
         env:
           ASSET: ${{ needs.build.outputs.asset }}
-          SHA256: ${{ needs.build.outputs.sha256 }}
+          SHA256: ${{ needs.sign.outputs.sha256 }}
         run: |
           set -eu
           cd dist
@@ -121,10 +178,11 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
           ASSET: ${{ needs.build.outputs.asset }}
-          SHA256: ${{ needs.build.outputs.sha256 }}
-          CERT_SHA1: ${{ needs.build.outputs.cert_sha1 }}
+          SHA256: ${{ needs.sign.outputs.sha256 }}
+          CERT_SHA1: ${{ needs.sign.outputs.cert_sha1 }}
         run: |
           set -eu
+          requirement=$(sh scripts/release-info.sh requirement "$CERT_SHA1")
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           wardenrun $VERSION for macOS 13 or later (Apple silicon and Intel). The binary is signed
           with the project's self-signed certificate, not notarized by Apple.
@@ -136,10 +194,14 @@ jobs:
 
           \`\`\`
           shasum -a 256 -c $ASSET.sha256
-          gh attestation verify $ASSET --repo $GITHUB_REPOSITORY
+          gh attestation verify $ASSET --repo $GITHUB_REPOSITORY \\
+            --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml
           tar -xzf $ASSET wardenrun
-          codesign -d -r- ./wardenrun 2>&1 | grep '$CERT_SHA1'
+          codesign -d -r- ./wardenrun 2>&1 | sed 's/^# *//' | grep -Fx '$requirement'
           \`\`\`
+
+          The last command must print the one line it searches for. A line that merely contains the
+          certificate hash is not enough.
           EOF
       - name: Create the release
         env:
@@ -153,23 +215,29 @@ jobs:
             "dist/$ASSET" "dist/$ASSET.sha256"
 
   # Updates the Homebrew tap when TAP_TOKEN is set; without it the job ends with a notice.
+  # The formula is rendered in a step that has no token; the step that has it runs git only.
   tap:
-    needs: [build, release]
+    needs: [build, sign, release]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: release
     outputs:
       published: ${{ steps.publish.outputs.published }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Render the formula and push it to the tap
+      - name: Render the formula
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA256: ${{ needs.sign.outputs.sha256 }}
+          CERT_SHA1: ${{ needs.sign.outputs.cert_sha1 }}
+        run: sh scripts/render-formula.sh "$VERSION" "$SHA256" "$CERT_SHA1" > "$RUNNER_TEMP/wardenrun.rb"
+      - name: Push the formula to the tap
         id: publish
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
           VERSION: ${{ needs.build.outputs.version }}
-          SHA256: ${{ needs.build.outputs.sha256 }}
-          CERT_SHA1: ${{ needs.build.outputs.cert_sha1 }}
         run: |
           set -eu
           if [ -z "$TAP_TOKEN" ]; then
@@ -178,14 +246,14 @@ jobs:
             exit 0
           fi
           # The token goes into one HTTP header of the git commands below; it is not stored in
-          # the clone's configuration.
+          # the clone's configuration, and no repository script runs while it is in the environment.
           auth=$(printf 'x-access-token:%s' "$TAP_TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$auth"
           tap="$RUNNER_TEMP/tap"
           git -c "http.extraHeader=Authorization: Basic $auth" clone --depth 1 \
             "https://github.com/mateuszgachowski/homebrew-tap.git" "$tap"
           mkdir -p "$tap/Formula"
-          sh scripts/render-formula.sh "$VERSION" "$SHA256" "$CERT_SHA1" > "$tap/Formula/wardenrun.rb"
+          cp "$RUNNER_TEMP/wardenrun.rb" "$tap/Formula/wardenrun.rb"
           cd "$tap"
           git add Formula/wardenrun.rb
           if git diff --cached --quiet; then
@@ -198,17 +266,21 @@ jobs:
           echo "published=true" >> "$GITHUB_OUTPUT"
 
   # The release is already public here. If Homebrew's install breaks the signature, this job
-  # fails loudly: docs/RELEASING.md says what to do (yank the release, fix, new tag).
+  # fails loudly: docs/RELEASING.md says what to do (yank the release, fix, new tag). It runs on
+  # the runner's architecture (Apple silicon); an Intel install is not exercised.
   verify-install:
-    needs: [build, tap]
+    needs: [build, sign, tap]
     if: needs.tap.outputs.published == 'true'
     runs-on: macos-15
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Install from the tap and check the signature
         env:
           VERSION: ${{ needs.build.outputs.version }}
-          CERT_SHA1: ${{ needs.build.outputs.cert_sha1 }}
+          CERT_SHA1: ${{ needs.sign.outputs.cert_sha1 }}
         run: |
           set -eu
           export HOMEBREW_NO_INSTALL_CLEANUP=1
@@ -222,7 +294,7 @@ jobs:
           done
           binary="$(brew --prefix)/bin/wardenrun"
           codesign --verify --strict "$binary"
-          codesign -d -r- "$binary" 2>&1 | grep -F "H\"$CERT_SHA1\""
+          codesign -d -r- "$binary" 2>&1 | sh scripts/release-info.sh requirement-ok "$CERT_SHA1"
           brew test mateuszgachowski/tap/wardenrun
           "$binary" version | grep -Fx "wardenrun $VERSION"
           # A runner has no window server, so graphic-session may FAIL: only the named lines count.

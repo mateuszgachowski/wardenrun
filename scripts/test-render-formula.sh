@@ -36,7 +36,9 @@ run 1.2.3 "$sha" "$cert"
 if printf '%s\n' "$out" | grep -q '@[A-Z0-9_]*@'; then bad rendersEveryPlaceholder "left: $(printf '%s\n' "$out" | grep '@[A-Z0-9_]*@')"; else pass rendersEveryPlaceholder; fi
 contains theUrlNamesTheTagAndTheAsset 'url "https://github.com/mateuszgachowski/wardenrun/releases/download/v1.2.3/wardenrun-1.2.3-macos-universal.tar.gz"'
 contains theSha256IsInTheFormula "sha256 \"$sha\""
-contains theCertificateHashIsInTheTestBlock "H\\\"$cert\\\""
+contains theTestBlockPinsTheWholeRequirementLine "'designated => identifier \"io.github.mateuszgachowski.wardenrun\" and certificate leaf = H\"$cert\"'"
+contains theTestBlockComparesTheLineExactly 'assert_equal'
+lacks theTestBlockDoesNotJustSearchTheOutput 'assert_match "H'
 contains theTestBlockChecksTheVersion 'wardenrun 1.2.3'
 contains theTestBlockChecksTheSignature '--verify'
 contains theTestBlockReadsTheRequirement 'codesign -d -r-'
@@ -65,5 +67,10 @@ refuses rejectsAShortCertificateHash 1.2.3 "$sha" fedcba98
 refuses rejectsACertificateHashThatIsASha256 1.2.3 "$sha" "$sha"
 refuses rejectsMissingArguments 1.2.3 "$sha"
 refuses rejectsExtraArguments 1.2.3 "$sha" "$cert" extra
+nl='
+'
+refuses rejectsAFormulaInjectionHiddenInASha256WithANewline 1.2.3 "${sha}\"; system \"id\"; z=\"${nl}${sha}" "$cert"
+refuses rejectsAVersionWithANewline "1.2.3${nl}9.9.9" "$sha" "$cert"
+refuses rejectsACertificateHashWithANewline 1.2.3 "$sha" "${cert}${nl}${cert}"
 
 [ ! -s "$tmp/failed" ]

@@ -7,6 +7,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 if [ "$(uname -s)" != Darwin ]; then echo "skip: needs macOS"; exit 0; fi
 verify="$here/verify-release-binary.sh"
 package="$here/package-release.sh"
+sign="$here/sign-release.sh"
+build="$here/build-release-binary.sh"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/test-verify.XXXXXX") || exit 2
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 : > "$tmp/failed"
@@ -34,6 +36,23 @@ out=$(sh "$verify" "$tmp/nothing" "$cert" 1.2.3 2>&1) || status=$?
 if printf '%s' "$out" | grep -q "no executable file at $tmp/nothing"; then pass verifyNamesTheMissingFile; else bad verifyNamesTheMissingFile "$out"; fi
 printf 'not executable\n' > "$tmp/plain"
 check verifyRejectsAFileThatIsNotExecutable 1 "$verify" "$tmp/plain" "$cert" 1.2.3
+
+nl='
+'
+check verifyRejectsANewlineInTheCertificateHash 64 "$verify" /bin/ls "$cert${nl}$cert" 1.2.3
+check verifyRejectsANewlineInTheVersion 64 "$verify" /bin/ls "$cert" "1.2.3${nl}9.9.9"
+
+check signNeedsABinaryAndAVersion 1 "$sign"
+status=0
+out=$(env -u SIGN_IDENTITY sh "$sign" /bin/ls 1.2.3 2>&1) || status=$?
+if [ "$status" -eq 1 ] && printf '%s' "$out" | grep -q 'SIGN_IDENTITY is not set'; then pass signSaysWhyItStopped; else bad signSaysWhyItStopped "$status $out"; fi
+status=0
+out=$(SIGN_IDENTITY=x sh "$sign" "$tmp/nothing" 1.2.3 2>&1) || status=$?
+if [ "$status" -eq 1 ] && printf '%s' "$out" | grep -q 'no such binary'; then pass signRejectsAMissingBinary; else bad signRejectsAMissingBinary "$status $out"; fi
+status=0
+out=$(SIGN_IDENTITY=x sh "$sign" /bin/ls v1.2.3 2>&1) || status=$?
+if [ "$status" -eq 1 ] && printf '%s' "$out" | grep -q 'VERSION must be X.Y.Z'; then pass signRejectsAVersionWithAV; else bad signRejectsAVersionWithAV "$status $out"; fi
+check buildNeedsADestination 1 "$build"
 
 check packageNeedsAVersion 1 "$package"
 check packageNeedsASigningIdentity 1 "$package" 1.2.3

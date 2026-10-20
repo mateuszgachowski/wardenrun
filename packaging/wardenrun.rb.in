@@ -31,7 +31,12 @@ class Wardenrun < Formula
   test do
     assert_match "wardenrun @VERSION@", shell_output("#{bin}/wardenrun version")
     system "/usr/bin/codesign", "--verify", "--strict", bin/"wardenrun"
+    # The whole requirement line, not a search for the hash: a requirement that merely
+    # mentions the pinned certificate (for example "... or ...") must not pass.
     requirement = shell_output("/usr/bin/codesign -d -r- #{bin}/wardenrun 2>&1")
-    assert_match "H\"@CERT_SHA1@\"", requirement
+    designated = requirement.lines.map { |line| line.strip.sub(/\A#\s*/, "") }
+                            .select { |line| line.start_with?("designated =>") }
+    assert_equal ['designated => identifier "io.github.mateuszgachowski.wardenrun" and certificate leaf = H"@CERT_SHA1@"'],
+                 designated.uniq
   end
 end

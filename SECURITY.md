@@ -25,7 +25,9 @@ best-effort basis: this is a free project maintained by one person.
 Releases are signed with a self-signed code-signing certificate, so that the keychain item
 wardenrun creates keeps working across upgrades. The certificate hash will be published here
 and in the README **together with the first release**. A different hash means the binary was
-not signed by this project. Each release also carries a GitHub artifact attestation and a
+not signed by this project. The hash is committed in
+`packaging/signing-cert.sha1` once the first release exists, and the
+release workflow refuses to sign with any other certificate. Each release also carries a GitHub artifact attestation and a
 `.sha256` file; how they are made and checked is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 If the signing key is ever leaked, or a malicious release is published, the rotation is:

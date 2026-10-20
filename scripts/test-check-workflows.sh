@@ -248,6 +248,402 @@ EOF
     expect_fail brokenYamlFailsWhenRubyExists W5
 fi
 
+# --- Ways around the first, line-based lint (found by review) ---
+workflow toJsonSecretsFail <<'EOF'
+name: x
+on: [push, workflow_call, pull_request_target]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    env: {ALL: "${{ toJSON(secrets) }}"}
+    steps:
+      - run: echo hi
+EOF
+expect_fail toJsonSecretsFail W3
+
+workflow bracketSecretsWithWorkflowRunFail <<'EOF'
+name: x
+on: workflow_run
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        env:
+          K: ${{ secrets['TAP_TOKEN'] }}
+EOF
+expect_fail bracketSecretsWithWorkflowRunFail W3
+
+mkdir -p "$tmp/inheritPullRequestTargetFail/.github/workflows"
+workflow inheritPullRequestTargetFail <<'EOF'
+name: x
+on: pull_request_target
+permissions:
+  contents: read
+jobs:
+  call:
+    uses: ./.github/workflows/other.yml
+    secrets: inherit
+EOF
+expect_fail inheritPullRequestTargetFail W3
+
+workflow pullRequestReviewWithSecretFails <<'EOF'
+name: x
+on: pull_request_review
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        env:
+          K: ${{ secrets.TAP_TOKEN }}
+EOF
+expect_fail pullRequestReviewWithSecretFails W3
+
+workflow branchPushWithSecretFails <<'EOF'
+name: x
+on: push
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        env:
+          K: ${{ secrets.TAP_TOKEN }}
+EOF
+expect_fail branchPushWithSecretFails W3
+
+workflow tagAndBranchPushWithSecretFails <<'EOF'
+name: x
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        env:
+          K: ${{ secrets.TAP_TOKEN }}
+EOF
+expect_fail tagAndBranchPushWithSecretFails W3
+
+workflow aCommentCharacterInAStringDoesNotHideATrigger <<'EOF'
+name: x
+on: {push: {tags: ["v #1"]}, pull_request_target: {}}
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        env:
+          K: ${{ secrets.TAP_TOKEN }}
+EOF
+expect_fail aCommentCharacterInAStringDoesNotHideATrigger W3
+
+workflow writeAllPermissionsFail <<'EOF'
+name: x
+on: [push]
+permissions: write-all
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+expect_fail writeAllPermissionsFail W2
+
+workflow aTopLevelWriteGrantFails <<'EOF'
+name: x
+on: [push]
+permissions:
+  contents: write
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+expect_fail aTopLevelWriteGrantFails W2
+
+workflow aJobWithWriteAllFails <<'EOF'
+name: x
+on: [push]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - run: echo hi
+EOF
+expect_fail aJobWithWriteAllFails W2
+
+workflow flowStyleUsesFails <<'EOF'
+name: x
+on: [push]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: actions/checkout@v4}
+EOF
+expect_fail flowStyleUsesFails W1
+
+workflow quotedKeyUsesFails <<'EOF'
+name: x
+on: [push]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - "uses": actions/setup-node@v4
+EOF
+expect_fail quotedKeyUsesFails W1
+
+workflow dockerUsesFails <<'EOF'
+name: x
+on: [push]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:3.19
+EOF
+expect_fail dockerUsesFails W1
+
+workflow secretInsideARunScriptFails <<'EOF'
+name: x
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ secrets.TAP_TOKEN }}"
+EOF
+expect_fail secretInsideARunScriptFails W6
+
+workflow secretInAJobLevelEnvFails <<'EOF'
+name: x
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    env:
+      K: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - run: echo hi
+EOF
+expect_fail secretInAJobLevelEnvFails W6
+
+workflow secretsInheritInATagWorkflowFails <<'EOF'
+name: x
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  call:
+    uses: ./.github/workflows/other.yml
+    secrets: inherit
+EOF
+expect_fail secretsInheritInATagWorkflowFails W6
+
+workflow secretMixedWithTextInAnEnvValueFails <<'EOF'
+name: x
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        env:
+          K: "prefix-${{ secrets.TAP_TOKEN }}"
+EOF
+expect_fail secretMixedWithTextInAnEnvValueFails W6
+
+workflow aHashInsideAStringDoesNotHideAnInterpolation <<'EOF'
+name: x
+on: [push]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo " #"; echo "${{ github.event.pull_request.title }}"
+EOF
+expect_fail aHashInsideAStringDoesNotHideAnInterpolation W4
+
+workflow aSecretInAStepEnvOfATagWorkflowPasses <<'EOF'
+name: x
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+        env:
+          K: ${{ secrets.TAP_TOKEN }}
+EOF
+expect_ok aSecretInAStepEnvOfATagWorkflowPasses
+
+workflow aSecretInTheWithOfAStepPasses <<'EOF'
+name: x
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          token: ${{ secrets.TAP_TOKEN }}
+EOF
+expect_ok aSecretInTheWithOfAStepPasses
+
+workflow theWordSecretsInProseDoesNotCount <<'EOF'
+name: no secrets are read here
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "this job has no secrets"
+EOF
+expect_ok theWordSecretsInProseDoesNotCount
+
+workflow theGithubTokenInARunScriptIsNotASecretOfOurs <<'EOF'
+name: x
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+EOF
+expect_ok theGithubTokenInARunScriptIsNotASecretOfOurs
+
+workflow aWorkflowWithoutSecretsMayUseAnyTrigger <<'EOF'
+name: x
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+expect_ok aWorkflowWithoutSecretsMayUseAnyTrigger
+
+workflow aJobMayRaiseItsOwnPermissions <<'EOF'
+name: x
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - run: echo hi
+EOF
+expect_ok aJobMayRaiseItsOwnPermissions
+
+workflow anEventConditionInAnIfIsFine <<'EOF'
+name: x
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ github.event.pull_request.draft == false }}
+        run: echo hi
+EOF
+expect_ok anEventConditionInAnIfIsFine
+
+workflow readAllIsAnAcceptableDefault <<'EOF'
+name: x
+on: [push]
+permissions: read-all
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+expect_ok readAllIsAnAcceptableDefault
+
+workflow anUnknownPermissionsStringFails <<'EOF'
+name: x
+on: [push]
+permissions: contents
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+expect_fail anUnknownPermissionsStringFails W2
+
 # The repository's own workflows must pass.
 status=0
 out=$(sh "$lint" "$repo" 2>&1) || status=$?

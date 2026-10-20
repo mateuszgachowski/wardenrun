@@ -1,9 +1,10 @@
 # Releasing wardenrun
 
 The runbook for the maintainer. A release is a tag: pushing `vX.Y.Z` starts
-[`.github/workflows/release.yml`](../.github/workflows/release.yml), which tests, signs,
-verifies, attests and publishes, then updates the Homebrew tap and installs from it as a last
-check. Nothing in this file is needed to *use* wardenrun.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), which tests and builds
+(no secrets), signs and verifies (the only job with the signing key), attests and publishes,
+then updates the Homebrew tap and installs from it as a last check. Nothing in this file is
+needed to *use* wardenrun.
 
 > **No release has been cut yet.** Sections 1 and 3 have to be done once, by hand, on a real
 > Mac, before the first tag. The pipeline's scripts were checked by the CI dry run
@@ -60,8 +61,34 @@ published and pinned:
 /usr/bin/openssl x509 -in cert.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f'
 ```
 
-Set the three secrets of the repository (Settings, Secrets and variables, Actions), or with
-`gh` from your own machine:
+**Pin the certificate in the repository.** Put the SHA-1 you just read, as one line, into
+`packaging/signing-cert.sha1` and commit it (it is public information, and it is also what the
+formula and the README will pin). The release workflow refuses to sign with any other
+certificate and refuses to run at all while the file is missing or malformed: a secret that was
+swapped or replaced by mistake cannot silently change who users trust.
+
+```sh
+/usr/bin/openssl x509 -in cert.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f' \
+    > /path/to/wardenrun/packaging/signing-cert.sha1
+```
+
+**Repository settings (do these before the first tag).** The workflow of the tagged commit
+runs with the secrets, so whoever can push a tag can run any code next to them. Narrow that:
+
+1. Settings, Environments: create the environment `release`. Add yourself as a **required
+   reviewer** and restrict deployments to the tag pattern `v*`. The `sign` and `tap` jobs run in
+   this environment; put the three secrets below into **its** secrets, not into the
+   repository's, so that no other workflow can read them.
+2. Settings, Rules: a tag ruleset for `v*` that only you may create, and that nobody may update
+   or delete. Branch protection for `main` (pull request required) as well.
+3. Keep the `Actions` permissions at "read repository contents" by default, and do not allow
+   workflows from pull requests of forks to run with secrets (that is the default).
+
+The workflow also stops when the tagged commit is not on `main`; that guards against a mistaken
+tag, not against somebody with write access, who could edit the workflow: the settings above do.
+
+Set the three secrets (Settings, Environments, `release`, or with `gh` from your own
+machine):
 
 | Secret | Value |
 |--------|-------|
@@ -70,9 +97,9 @@ Set the three secrets of the repository (Settings, Secrets and variables, Action
 | `TAP_TOKEN` | a fine-grained personal access token with **Contents: read and write** on the tap repository `homebrew-tap` and nothing else. Without it the tap job ends with a notice and the release still happens. |
 
 ```sh
-base64 -i wardenrun-release.p12 | gh secret set SIGNING_CERT_P12_BASE64
-gh secret set SIGNING_CERT_PASSWORD          # paste the password at the prompt
-gh secret set TAP_TOKEN                      # paste the token at the prompt
+base64 -i wardenrun-release.p12 | gh secret set SIGNING_CERT_P12_BASE64 --env release
+gh secret set SIGNING_CERT_PASSWORD --env release     # paste the password at the prompt
+gh secret set TAP_TOKEN --env release                 # paste the token at the prompt
 ```
 
 The tap is an ordinary public repository named `mateuszgachowski/homebrew-tap` (Homebrew's
@@ -101,6 +128,7 @@ Prerequisite: the manual checklist of section 3 passed on the commit you are abo
 
 1. **Make the release commit.** In `Sources/WardenrunCore/Usage.swift` change
    `WardenrunVersion.current` from `0.1.0-dev` to the release version (for example `0.1.0`).
+   For the first release the same commit carries `packaging/signing-cert.sha1` (section 1).
    Commit it on `main` through a pull request like any change.
 2. **Tag that commit** and push the tag (the tag must be `v` plus exactly that version):
 
@@ -109,27 +137,49 @@ Prerequisite: the manual checklist of section 3 passed on the commit you are abo
    git push origin v0.1.0
    ```
 
-3. **Watch the run** (Actions, "release"). What each job does and where it stops:
+3. **Approve the deployment** if you set required reviewers (section 1), and watch the run
+   (Actions, "release"). What each job does and where it stops:
 
    | Job | What it does | It stops (and nothing is published) when |
    |-----|--------------|------------------------------------------|
-   | `build` (macOS) | checks the tag equals `WardenrunVersion.current`; `swift test`; imports the certificate into a temporary keychain; builds a universal binary, signs it with the hardened runtime; verifies the binary inside the tarball (signature, hardened runtime, no `get-task-allow`, both architectures, designated requirement names exactly this certificate, reports the version); uploads tarball and checksum; deletes the keychain, always | the tag differs from the source, a test fails, the certificate cannot be imported, any check of the binary fails |
-   | `release` (Ubuntu) | re-checks the checksum, attests the build provenance of the tarball (GitHub artifact attestation), creates the GitHub release with tarball, `.sha256` and notes that contain the certificate SHA-1 | `build` did not finish clean; a release for that tag already exists |
-   | `tap` (Ubuntu) | renders the formula from `packaging/wardenrun.rb.in` and pushes it to the tap | (skipped with a notice when `TAP_TOKEN` is empty) |
-   | `verify-install` (macOS) | `brew tap`, `brew install`, `codesign` requirement contains the certificate SHA-1, `brew test`, `wardenrun version`, `wardenrun doctor` shows `ok` for `hardened-runtime` (a runner has no screen session, so other lines may fail) | **fails after publishing**: see section 5 |
+   | `build` (macOS, no secrets) | checks the tag equals `WardenrunVersion.current` and that the tagged commit is on `main`; `swift test`; the tests must leave the tree clean; builds the universal binary, unsigned | the tag differs from the source, the commit is not on `main`, a test fails, the build fails |
+   | `sign` (macOS, the signing key) | imports the certificate into a temporary keychain; **checks its SHA-1 against `packaging/signing-cert.sha1`**; signs with the hardened runtime (`scripts/sign-release.sh`: codesign and tar, no Swift, no tests); **deletes the keychain**; then verifies the binary inside the tarball (signature, hardened runtime, no entitlements, both architectures, the designated requirement is exactly the pinned one, reports the version); uploads tarball and checksum | the pin file is missing or differs, the certificate cannot be imported, any check of the binary fails |
+   | `release` (Ubuntu) | re-checks the checksum, attests the build provenance of the tarball (GitHub artifact attestation), creates the GitHub release with tarball, `.sha256` and notes that contain the certificate SHA-1 | `build` or `sign` did not finish clean; a release for that tag already exists |
+   | `tap` (Ubuntu, `TAP_TOKEN`) | renders the formula from `packaging/wardenrun.rb.in` in a step without the token, then pushes it to the tap with `git` only | (skipped with a notice when `TAP_TOKEN` is empty) |
+   | `verify-install` (macOS, Apple silicon) | `brew tap`, `brew install`, the `codesign` requirement is exactly the pinned one, `brew test`, `wardenrun version`, `wardenrun doctor` shows `ok` for `hardened-runtime` (a runner has no screen session, so other lines may fail) | **fails after publishing**: see section 5 |
 
 4. **Bump the development version** back (for example `0.1.1-dev`) in a follow-up pull request,
    so a build from `main` never claims to be the release.
 
-A tag is never reused. If a release has to be redone, delete it (section 5) and tag the next
-version.
+**A tag is never reused or moved**, not even when a job failed before anything was published:
+an attestation of the tarball may already be public, and a moved tag would make it point at
+other code. Fix the cause and release the next version (`0.1.1`), whatever the failure was.
 
 ## 3. Manual checklist before tagging
 
 The Touch ID flows cannot run on a CI runner. Run these on a real Mac with a fingerprint
-sensor, with a **release build signed with the real certificate** (`scripts/package-release.sh`
-with `SIGN_IDENTITY` set, or the artifact of a dry-run tag in a fork), against a real Vaultwarden
+sensor, with a **release build signed with the real certificate**, against a real Vaultwarden
 and the dedicated account. Tick each line; any failure stops the release.
+
+To sign locally, import the offline PKCS#12 file into a throw-away keychain (never copy the key
+into another repository's secrets for this), build, and delete the keychain again. The tree must
+be clean and the version the one of the release commit:
+
+```sh
+cd /path/to/wardenrun                      # the commit you are about to tag
+read -rs P12_PASSWORD; export P12_PASSWORD  # the PKCS#12 password; nothing is echoed
+KEYCHAIN_PASSWORD=$(/usr/bin/openssl rand -hex 24); export KEYCHAIN_PASSWORD
+keychain="$TMPDIR/wardenrun-test.keychain-db"
+cert=$(sh scripts/import-signing-cert.sh ~/wardenrun-signing/wardenrun-release.p12 "$keychain")
+sh scripts/release-info.sh check-cert-pin "$cert"
+SIGN_IDENTITY=$cert SIGN_KEYCHAIN=$keychain DIST=$TMPDIR/wardenrun-dist sh scripts/package-release.sh 0.1.0
+security delete-keychain "$keychain"
+tar -xzf "$TMPDIR/wardenrun-dist/wardenrun-0.1.0-macos-universal.tar.gz" -C "$TMPDIR/wardenrun-dist"
+sh scripts/verify-release-binary.sh "$TMPDIR/wardenrun-dist/wardenrun" "$cert" 0.1.0
+```
+
+`security import` takes the PKCS#12 password as an argument, so other processes of your user can
+see it for a moment: do this on your own single-user Mac only.
 
 - [ ] `wardenrun doctor`: every line `ok` (the `bw` version may say `untested`), `certificate`
       shows the SHA-1 from section 1.
@@ -170,8 +220,14 @@ and the dedicated account. Tick each line; any failure stops the release.
 
    ```sh
    shasum -a 256 -c wardenrun-0.1.0-macos-universal.tar.gz.sha256
-   gh attestation verify wardenrun-0.1.0-macos-universal.tar.gz --repo mateuszgachowski/wardenrun
+   gh attestation verify wardenrun-0.1.0-macos-universal.tar.gz --repo mateuszgachowski/wardenrun \
+       --signer-workflow mateuszgachowski/wardenrun/.github/workflows/release.yml
    ```
+
+   `--repo` alone accepts an attestation made by any workflow of the repository; the signer
+   workflow narrows it to `release.yml`. The requirement check in the release notes compares one
+   whole line (`sh scripts/release-info.sh requirement <sha1>` prints it), not a search for the
+   hash.
 
 3. Install from the tap on a clean machine once more (checklist, last item).
 
@@ -182,19 +238,28 @@ signature is not the one the keychain item expects (for example Homebrew re-sign
 it). Do not announce the release.
 
 1. Look at the log of the job: which check failed (`codesign` requirement, `brew test`, `doctor`).
-2. **Yank the release** and its tag, and revert the tap commit:
+2. **Yank the release** and its tag, and revert the tap commit (find it by its message, it
+   need not be the last one):
 
    ```sh
    gh release delete v0.1.0 --cleanup-tag --yes
    git clone git@github.com:mateuszgachowski/homebrew-tap.git && cd homebrew-tap
-   git revert --no-edit HEAD && git push origin HEAD
+   git log --oneline -5                       # find "wardenrun 0.1.0"
+   git revert --no-edit <that commit> && git push origin HEAD
    ```
 
 3. Fix the cause (formula, `skip_clean`, install step), run the dry run and the manual
-   checklist again, then cut a **new** tag (`v0.1.1`). Never move or reuse a tag.
+   checklist again, then cut the **next** version (`v0.1.1`). Never move or reuse a tag.
 
-If `build` or `release` fails, nothing is public: fix, delete the tag locally and on the remote
-(`git push --delete origin vX.Y.Z`), and tag again.
+If `build` or `sign` fails, nothing is public: fix the cause, delete the failed tag on the
+remote (`git push --delete origin vX.Y.Z`) and locally, and release the **next** version.
+
+If `release` fails after the attestation step, the attestation may already exist: treat it the
+same way and use the next version.
+
+If only `tap` fails (the release is public, the formula is stale; `verify-install` is skipped):
+fix the cause (usually `TAP_TOKEN` or the tap repository's name), then use "Re-run failed jobs"
+on the run. Nothing else needs to change; the tarball and the checksum are already final.
 
 ## 6. After a leak: rotation
 
@@ -202,7 +267,9 @@ When the signing key may have leaked, or a release that should not exist was pub
 
 1. Delete the three secrets, delete the compromised release (`gh release delete`), and publish a
    security advisory that names the old certificate SHA-1 as revoked (also in `SECURITY.md`).
-2. Generate a new certificate (section 1), set the secrets, cut a new release signed with it.
+2. Generate a new certificate (section 1), set the secrets, put its SHA-1 into
+   `packaging/signing-cert.sha1` (a pull request: the pin changes in public), cut a new release
+   signed with it.
 3. Users run `wardenrun setup` again: the keychain item of the old signer cannot be read by the
    new binary, by design. They check the new SHA-1 against `SECURITY.md`.
 4. Update the SHA-1 in the README and `SECURITY.md`, and record what happened in the advisory.

@@ -39,6 +39,9 @@ jobs:
           swift --version 2>&1 | grep -q 'Swift version 6\.0'
       - name: Test
         run: swift test
+      - name: The tests leave the tree as they found it (the release workflow requires it)
+        run: |
+          [ -z "$(git status --porcelain)" ] || { git status --short >&2; echo "the tests changed the working tree" >&2; exit 1; }
       - name: Release build, ad-hoc signature with the hardened runtime, doctor
         run: sh scripts/ci-signed-build.sh
       - name: Release script argument tests

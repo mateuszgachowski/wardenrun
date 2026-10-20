@@ -540,12 +540,24 @@ a physically stolen unlocked Mac; the security of Vaultwarden/`bw` themselves.
   blocking: the runbook (`docs/RELEASING.md`, section 5) says to yank the release and tag a
   fixed one. That Homebrew leaves the signature alone is still unproven until the first
   release runs it.
-- **What stops a release:** the tag differs from the version constant, a test fails, the
-  signature does not verify, the hardened-runtime flag is missing, a slice is missing from the
-  universal binary, or the designated requirement does not name the pinned certificate. All
-  of that is checked in the `build` job; nothing is published until it is clean.
+- **What stops a release:** the tag differs from the version constant or is not on `main`, a
+  test fails, the imported certificate is not the one committed in `packaging/signing-cert.sha1`,
+  the signature does not verify, the hardened-runtime flag is missing, the binary carries any
+  entitlement, a slice is missing from the universal binary, or the designated requirement is
+  not exactly `identifier "<fixed identifier>" and certificate leaf = H"<pinned SHA-1>"`. The
+  first checks run in the `build` job, the rest in the `sign` job; nothing is published until
+  both are clean.
+- **Who sees the key:** the job that tests and builds (it executes repository code: tests, the
+  package manifest) has no secrets; the job that holds the signing key runs shell scripts and
+  `codesign` only, deletes its keychain right after signing, and then verifies. The tap token is
+  present only in a step that runs `git`. The secrets sit in a protected environment
+  (`release`) and the `v*` tags are restricted by a ruleset; see `docs/RELEASING.md`. These two
+  are repository settings: the workflow cannot enforce them on somebody who can edit it.
+- `verify-install` runs on the runner's architecture (Apple silicon); an Intel install is not
+  exercised by CI.
 - Apple Silicon and Intel are both first-class (Intel Macs with a T2 chip have Touch ID too).
-- Version pinning of `bw`: the formula declares the tested range; `doctor` warns outside it.
+- Version pinning of `bw`: the formula declares no range (its caveats name the signed `bw`
+  from Bitwarden's releases); `doctor` marks a `bw` version outside the tested one as `untested`.
 
 ## 8. Testing
 

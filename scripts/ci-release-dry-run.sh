@@ -43,6 +43,9 @@ echo "dry run: imported a throw-away certificate, SHA-1 $cert"
 
 # 0.0.0 only names the tarball; the binary says what the source says.
 SIGN_IDENTITY=$cert SIGN_KEYCHAIN=$keychain DIST="$work/dist" sh "$here/package-release.sh" 0.0.0
+# The release workflow deletes the signing keychain right after signing, before it runs the
+# signed binary: do the same here, so that the dry run covers that order.
+security delete-keychain "$keychain"
 asset=$(sh "$here/release-info.sh" name 0.0.0)
 mkdir "$work/unpacked"
 tar -C "$work/unpacked" -xzf "$work/dist/$asset"

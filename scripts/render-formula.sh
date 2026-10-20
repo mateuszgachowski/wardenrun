@@ -10,14 +10,23 @@ template="$here/../packaging/wardenrun.rb.in"
 
 usage() { printf 'render-formula: %s\n' "$1" >&2; exit 64; }
 
+nl='
+'
+# valid VALUE ERE: one line only (grep alone passes when any line of a multi-line value matches,
+# and a newline in a value would put Ruby code into the formula)
+valid() {
+    case "$1" in *"$nl"*) return 1 ;; esac
+    printf '%s' "$1" | grep -Eq "$2"
+}
+
 [ "$#" -eq 3 ] || usage "usage: render-formula.sh VERSION SHA256 CERT_SHA1"
 version=$1
 sha256=$2
 cert=$3
 
-printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || usage "VERSION must be X.Y.Z"
-printf '%s\n' "$sha256" | grep -Eq '^[0-9a-f]{64}$' || usage "SHA256 must be 64 lower-case hex digits"
-printf '%s\n' "$cert" | grep -Eq '^[0-9a-f]{40}$' || usage "CERT_SHA1 must be 40 lower-case hex digits"
+valid "$version" '^[0-9]+\.[0-9]+\.[0-9]+$' || usage "VERSION must be X.Y.Z"
+valid "$sha256" '^[0-9a-f]{64}$' || usage "SHA256 must be 64 lower-case hex digits"
+valid "$cert" '^[0-9a-f]{40}$' || usage "CERT_SHA1 must be 40 lower-case hex digits"
 [ -f "$template" ] || usage "template not found: $template"
 
 asset=$(sh "$here/release-info.sh" name "$version") || usage "no asset name for $version"

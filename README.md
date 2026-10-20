@@ -479,15 +479,21 @@ A secrets tool should be easy to audit. The design gives you these checks:
   makes no network call, so it does not check the Vaultwarden version.
 - **The signing certificate hash** will be published here and in [`SECURITY.md`](SECURITY.md)
   with the first release. Check your install with `codesign -d -r- "$(command -v wardenrun)"`:
-  the requirement it prints must contain that hash. A different hash means a different signer.
+  the requirement it prints must be exactly
+  `designated => identifier "io.github.mateuszgachowski.wardenrun" and certificate leaf = H"<hash>"`.
+  A different hash, or a longer requirement, means a different signer.
 - **Checksum and attestation of a release download** (instructions for after the first
   release; there is nothing to download yet). Each release has a tarball, a `.sha256` file and
   a GitHub artifact attestation that says which workflow run built the tarball:
 
   ```sh
   shasum -a 256 -c wardenrun-X.Y.Z-macos-universal.tar.gz.sha256
-  gh attestation verify wardenrun-X.Y.Z-macos-universal.tar.gz --repo mateuszgachowski/wardenrun
+  gh attestation verify wardenrun-X.Y.Z-macos-universal.tar.gz --repo mateuszgachowski/wardenrun \
+      --signer-workflow mateuszgachowski/wardenrun/.github/workflows/release.yml
   ```
+
+  The release notes also give the one line that `codesign -d -r-` must print for the pinned
+  certificate; a requirement that only contains the hash is not enough.
 - **The audit log** is plain JSON lines: `tail -n 5 ~/Library/Logs/wardenrun/audit.jsonl`.
 - **The security-critical code is small and separated.** The platform-neutral core (masking,
   the `bw` driver, environment handling) lives in `Sources/WardenrunCore/`; the macOS parts

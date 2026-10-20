@@ -48,7 +48,7 @@ if ! security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$tmp/cer
 fi
 
 security find-identity -p codesigning "$keychain" \
-    | sed -n 's/^[[:space:]]*[0-9][0-9]*) \([0-9A-Fa-f]\{40\}\) .*$/\1/p' | tr 'A-F' 'a-f' > "$tmp/hashes"
+    | sed -n 's/^[[:space:]]*[0-9][0-9]*) \([0-9A-Fa-f]\{40\}\) .*$/\1/p' | tr 'A-F' 'a-f' | sort -u > "$tmp/hashes"
 count=$(wc -l < "$tmp/hashes" | tr -d ' ')
 [ "$count" -eq 1 ] || die "expected exactly one code-signing identity in the p12, found $count"
 cat "$tmp/hashes"
