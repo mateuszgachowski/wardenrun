@@ -258,7 +258,7 @@ public enum RunFlow {
             return field == "totp" ? "the field \"\(name)\" is not supported yet (it would hand out the stored seed)"
                                    : "the field \"\(name)\" is not supported"
         case let error as BwError:
-            return "could not get the secret: \(error.summary)"
+            return error.summary
         case let error as ChildError:
             switch error {
             case .spawnFailed(let code): return "the command could not be started (error \(code))"
