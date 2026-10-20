@@ -17,3 +17,25 @@ jobs:
         run: sh scripts/test-check-docs.sh
       - name: Docs lint
         run: sh scripts/check-docs.sh
+
+  swift-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Select Xcode 16.2 (Swift 6.0.x, the minimum the package declares)
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app
+          swift --version
+          swift --version 2>&1 | grep -q 'Swift version 6\.0'
+      - name: Test
+        run: swift test
+
+  swift-linux:
+    runs-on: ubuntu-latest
+    container: swift:6.0.3-jammy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Toolchain
+        run: swift --version
+      - name: Test
+        run: swift test
